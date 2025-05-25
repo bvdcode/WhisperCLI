@@ -3,6 +3,7 @@ using Xabe.FFmpeg;
 using System.Text;
 using Whisper.net;
 using Serilog.Core;
+using Serilog.Events;
 using Whisper.net.Ggml;
 using Whisper.net.Logger;
 using System.Diagnostics;
@@ -18,7 +19,7 @@ namespace WhisperCLI
             Console.OutputEncoding = Encoding.UTF8;
             CancellationTokenSource cts = new();
             Logger logger = new LoggerConfiguration()
-                .MinimumLevel.Debug()
+                .MinimumLevel.Is(Debugger.IsAttached ? LogEventLevel.Debug : LogEventLevel.Information)
                 .WriteTo.Console()
                 .CreateLogger();
             LogProvider.AddLogger((level, text) =>
@@ -159,7 +160,7 @@ namespace WhisperCLI
 
         private static async Task TranscribeAudioAsync(FileInfo inputFile, GgmlType model, Logger logger, CancellationToken token)
         {
-            using WhisperProcessor processor = await CreateProcessorAsync(model, logger, token);
+            WhisperProcessor processor = await CreateProcessorAsync(model, logger, token);
             await CheckFfmpegAsync(logger, token);
             MemoryStream waves = await ConvertToWaveStreamAsync(inputFile, logger);
             StringBuilder sb = new();
@@ -186,6 +187,7 @@ namespace WhisperCLI
             string textFilePath = Path.ChangeExtension(inputFile.FullName, ".txt");
             File.WriteAllText(textFilePath, sb.ToString(), Encoding.UTF8);
             logger.Information("Transcription complete. Output saved to: {textFilePath}", textFilePath);
+            await processor.DisposeAsync();
         }
     }
 }
