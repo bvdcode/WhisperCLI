@@ -1,11 +1,11 @@
 ﻿using Serilog;
-using Serilog.Core;
-using System.Diagnostics;
+using Xabe.FFmpeg;
 using System.Text;
 using Whisper.net;
+using Serilog.Core;
 using Whisper.net.Ggml;
 using Whisper.net.Logger;
-using Xabe.FFmpeg;
+using System.Diagnostics;
 using Xabe.FFmpeg.Downloader;
 
 namespace WhisperCLI
@@ -23,7 +23,10 @@ namespace WhisperCLI
                 .CreateLogger();
             LogProvider.AddLogger((level, text) =>
             {
-                logger.Information("[Whisper] [{level}] {text}", level.ToString().ToUpperInvariant(), text);
+                if (!string.IsNullOrWhiteSpace(text))
+                {
+                    logger.Debug("[Whisper] [{level}] {text}", level.ToString().ToUpperInvariant(), text.Trim());
+                }
             });
             if (args.Length < 1)
             {
@@ -171,7 +174,8 @@ namespace WhisperCLI
                 }
                 sb.Append(result.Text);
                 prev = result.Text;
-                logger.Information("{lang}: {start}->{end}: {text}", result.Language, result.Start, result.End, result.Text);
+                logger.Information("{lang}: {start}->{end}: {text}", result.Language,
+                    result.Start.ToString("HH:mm:ss"), result.End.ToString("HH:mm:ss"), result.Text);
                 if (token.IsCancellationRequested)
                 {
                     logger.Information("Cancellation requested - stopping recognition");
