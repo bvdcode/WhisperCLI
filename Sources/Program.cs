@@ -1,10 +1,11 @@
 ﻿using Serilog;
+using Serilog.Core;
+using System.Diagnostics;
 using System.Text;
 using Whisper.net;
-using Xabe.FFmpeg;
-using Serilog.Core;
 using Whisper.net.Ggml;
-using System.Diagnostics;
+using Whisper.net.Logger;
+using Xabe.FFmpeg;
 using Xabe.FFmpeg.Downloader;
 
 namespace WhisperCLI
@@ -20,6 +21,10 @@ namespace WhisperCLI
                 .MinimumLevel.Debug()
                 .WriteTo.Console()
                 .CreateLogger();
+            LogProvider.AddLogger((level, text) =>
+            {
+                logger.Information("[Whisper] [{level}] {text}", level.ToString().ToUpperInvariant(), text);
+            });
             if (args.Length < 1)
             {
                 logger.Error("Usage: WhisperCLI <inputFilePath> [modelType]");
