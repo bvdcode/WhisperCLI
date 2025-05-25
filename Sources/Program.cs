@@ -1,12 +1,10 @@
 ﻿using Serilog;
-using Serilog.Core;
-using System.Diagnostics;
-using System.Diagnostics.Metrics;
 using System.Text;
-using Telegram.Bot.Types;
 using Whisper.net;
-using Whisper.net.Ggml;
 using Xabe.FFmpeg;
+using Serilog.Core;
+using Whisper.net.Ggml;
+using System.Diagnostics;
 using Xabe.FFmpeg.Downloader;
 
 namespace WhisperCLI
@@ -15,6 +13,7 @@ namespace WhisperCLI
     {
         public static async Task Main(string[] args)
         {
+            const GgmlType defaultModel = GgmlType.LargeV3Turbo;
             CancellationTokenSource cts = new();
             Logger logger = new LoggerConfiguration()
                 .MinimumLevel.Debug()
@@ -23,6 +22,10 @@ namespace WhisperCLI
             if (args.Length < 1)
             {
                 logger.Error("Usage: WhisperCLI <inputFilePath> [modelType]");
+                logger.Error("Available models: {models}", string.Join(", ", Enum.GetNames<GgmlType>()));
+                logger.Error("Default model: {defaultModel}", defaultModel);
+                logger.Error("Example: WhisperCLI audio.mp3");
+                logger.Error("Example: WhisperCLI audio.mp3 {defaultModel}", defaultModel);
                 return;
             }
             string inputFilePath = args[0];
@@ -32,7 +35,7 @@ namespace WhisperCLI
                 logger.Error("Input file does not exist: {inputFilePath}", inputFilePath);
                 return;
             }
-            GgmlType model = args.Length > 1 && Enum.TryParse<GgmlType>(args[1], true, out var parsedType) ? parsedType : GgmlType.LargeV3Turbo;
+            GgmlType model = args.Length > 1 && Enum.TryParse<GgmlType>(args[1], true, out var parsedType) ? parsedType : defaultModel;
             await TranscribeAudioAsync(inputFile, model, logger, cts.Token);
         }
 
