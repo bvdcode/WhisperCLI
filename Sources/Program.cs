@@ -176,7 +176,7 @@ namespace WhisperCLI
                 sb.Append(result.Text);
                 prev = result.Text;
                 logger.Information("{lang}: {start}->{end}: {text}", result.Language,
-                    result.Start.ToString("HH:mm:ss"), result.End.ToString("HH:mm:ss"), result.Text);
+                    result.Start.ToString(@"hh\:mm\:ss"), result.End.ToString(@"hh\:mm\:ss"), result.Text);
                 if (token.IsCancellationRequested)
                 {
                     logger.Information("Cancellation requested - stopping recognition");
