@@ -1,7 +1,10 @@
 ﻿using Serilog;
-using Whisper.net;
 using Serilog.Core;
+using System.Diagnostics;
+using Whisper.net;
 using Whisper.net.Ggml;
+using Xabe.FFmpeg;
+using Xabe.FFmpeg.Downloader;
 
 namespace WhisperCLI
 {
@@ -71,9 +74,54 @@ namespace WhisperCLI
             }
         }
 
+        private static void Exec(string cmd)
+        {
+            var escapedArgs = cmd.Replace("\"", "\\\"");
+
+            using var process = new Process
+            {
+                StartInfo = new ProcessStartInfo
+                {
+                    RedirectStandardOutput = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    WindowStyle = ProcessWindowStyle.Hidden,
+                    FileName = "/bin/bash",
+                    Arguments = $"-c \"{escapedArgs}\""
+                }
+            };
+
+            process.Start();
+            process.WaitForExit();
+        }
+
+        private static async Task CheckFfmpegAsync(ILogger logger, CancellationToken token)
+        {
+            string tempPath = Path.GetTempPath();
+            string workingDirectory = Path.Combine(tempPath, "WhisperCLI", "FFMpeg");
+            if (!Directory.Exists(workingDirectory))
+            {
+                Directory.CreateDirectory(workingDirectory);
+            }
+            FFmpeg.SetExecutablesPath(workingDirectory);
+            logger.Information("Checking FFmpeg...");
+            if (Directory.GetFiles(workingDirectory).Length == 0)
+            {
+                logger.Information("FFmpeg not found - downloading...");
+                await FFmpegDownloader.GetLatestVersion(FFmpegVersion.Official, FFmpeg.ExecutablesPath, new FFMpegDownloadingProgress(Log.Logger));
+                logger.Information("FFmpeg downloaded");
+                if (Environment.OSVersion.Platform == PlatformID.Unix)
+                {
+                    Exec("chmod +x " + Path.Combine(workingDirectory, "ffmpeg"));
+                    Exec("chmod +x " + Path.Combine(workingDirectory, "ffprobe"));
+                }
+            }
+        }
+
         private static async Task TranscribeAudioAsync(FileInfo inputFile, GgmlType model, ILogger logger, CancellationToken token)
         {
             using WhisperProcessor processor = await CreateProcessorAsync(model, logger, token);
+            await CheckFfmpegAsync(logger, token);
         }
     }
 }
