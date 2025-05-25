@@ -14,6 +14,7 @@ namespace WhisperCLI
         public static async Task Main(string[] args)
         {
             const GgmlType defaultModel = GgmlType.LargeV3Turbo;
+            Console.OutputEncoding = Encoding.UTF8;
             CancellationTokenSource cts = new();
             Logger logger = new LoggerConfiguration()
                 .MinimumLevel.Debug()
@@ -156,6 +157,7 @@ namespace WhisperCLI
             StringBuilder sb = new();
             Stopwatch sw = Stopwatch.StartNew();
             string prev = string.Empty;
+            logger.Information("Starting transcription for {inputFile} using model {model}", inputFile.Name, model);
             await foreach (var result in processor.ProcessAsync(waves, token))
             {
                 if (result.Text == prev)
