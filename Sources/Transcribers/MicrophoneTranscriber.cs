@@ -1,4 +1,5 @@
 ﻿using Serilog;
+using NAudio.Wave;
 using EchoSharp.NAudio;
 using System.Globalization;
 using EchoSharp.Whisper.net;
@@ -17,6 +18,26 @@ namespace WhisperCLI.Transcribers
         public MicrophoneTranscriber(ILogger logger, string whisperModelPath, string sileroVadModelPath, int microphoneIndex)
         {
             _logger = logger;
+            int deviceCount = WaveInEvent.DeviceCount;
+            if (deviceCount == 0)
+            {
+                _logger.Error("No audio input devices found.");
+                throw new InvalidOperationException("No microphone detected.");
+            }
+
+            _logger.Information("Found {count} audio input device(s):", deviceCount);
+            for (int i = 0; i < deviceCount; i++)
+            {
+                var caps = WaveInEvent.GetCapabilities(i);
+                _logger.Information("  Device {index}: {name}", i, caps.ProductName);
+            }
+
+            if (microphoneIndex < 0 || microphoneIndex >= deviceCount)
+            {
+                _logger.Error("Invalid microphoneIndex {idx}. Valid range is 0–{max}.", microphoneIndex, deviceCount - 1);
+                throw new ArgumentOutOfRangeException(nameof(microphoneIndex));
+            }
+            _logger.Information("Using microphone {index}: {name}", microphoneIndex, WaveInEvent.GetCapabilities(microphoneIndex).ProductName);
             var vadFactory = new SileroVadDetectorFactory(new SileroVadOptions(sileroVadModelPath)
             {
                 Threshold = 0.5f
