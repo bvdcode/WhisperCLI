@@ -10,7 +10,7 @@ namespace WhisperCLI
             "'tiny', 'base', 'small', 'medium', 'large-v1', 'large-v2', 'large-v3-turbo'.")]
         public GgmlType Model { get; set; }
 
-        [Value(1, Required = true, HelpText = "Path to the input audio file to transcribe.")]
+        [Value(1, Required = false, HelpText = "Path to the input audio file to transcribe.")]
         public string InputFilePath { get; set; } = string.Empty;
     }
 }
