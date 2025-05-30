@@ -28,7 +28,7 @@ namespace WhisperCLI.Transcribers
             _logger.Information("Using microphone[{index}]: {micName}", microphoneIndex, WaveInEvent.GetCapabilities(microphoneIndex).ProductName);
         }
 
-        public async Task TranscribeAudioAsync(WhisperProcessor processor, Action<FileInfo> callback, CancellationToken token)
+        public async Task TranscribeAudioAsync(WhisperProcessor processor, Action<FileInfo> callback, CancellationToken token, CancellationToken stopRecordingToken)
         {
             _logger.Information("Starting microphone recording...");
 
@@ -48,23 +48,10 @@ namespace WhisperCLI.Transcribers
                 waveWriter.Write(a.Buffer, 0, a.BytesRecorded);
             };
             waveIn.StartRecording();
-            ConsoleKey stopKey = ConsoleKey.Spacebar;
-            _logger.Information("Press {stopKey} to stop recording.", stopKey);
-            CancellationTokenSource cts = new();
-            Console.CancelKeyPress += (s, e) =>
+            while (!token.IsCancellationRequested && !stopRecordingToken.IsCancellationRequested)
             {
-                e.Cancel = true; // Prevent the process from terminating
-                cts.Cancel(); // Cancel the recording
-                _logger.Information("Recording cancellation requested.");
-            };
-            try
-            {
-                while (!token.IsCancellationRequested && !cts.IsCancellationRequested)
-                {
-                    await Task.Delay(100, token);
-                }
+                await Task.Delay(100, token);
             }
-            catch (TaskCanceledException) { }
 
             waveIn.StopRecording();
             waveWriter.Dispose();

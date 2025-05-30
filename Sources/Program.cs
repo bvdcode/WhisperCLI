@@ -32,8 +32,19 @@ namespace WhisperCLI
             using var processor = CreateProcessor(options.Model, whisperModelInfo, logger);
             if (string.IsNullOrWhiteSpace(options.InputFilePath))
             {
+                ConsoleKey stopKey = ConsoleKey.Spacebar;
+                logger.Information("Press {stopKey} to stop recording.", stopKey);
+                CancellationTokenSource recordingCts = new();
+                Console.CancelKeyPress += (s, e) =>
+                {
+                    e.Cancel = true;
+                    recordingCts.Cancel();
+                    logger.Information("Recording cancellation requested.");
+                };
+
                 await new MicrophoneTranscriber(logger, options.MicrophoneIndex)
-                    .TranscribeAudioAsync(processor, OpenFile, cts.Token);
+                    .TranscribeAudioAsync(processor, OpenFile, cts.Token, recordingCts.Token);
+                await Task.Delay(10_000);
             }
             else
             {
