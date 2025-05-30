@@ -28,7 +28,7 @@ namespace WhisperCLI.Transcribers
             _logger.Information("Using microphone[{index}]: {micName}", microphoneIndex, WaveInEvent.GetCapabilities(microphoneIndex).ProductName);
         }
 
-        public async Task TranscribeAudioAsync(WhisperProcessor processor, CancellationToken token)
+        public async Task TranscribeAudioAsync(WhisperProcessor processor, Action<FileInfo> callback, CancellationToken token)
         {
             _logger.Information("Starting microphone recording...");
 
@@ -92,6 +92,7 @@ namespace WhisperCLI.Transcribers
                 string textFile = Path.Combine(di.FullName, "transcription-" + DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".txt");
                 await File.WriteAllTextAsync(textFile, sb.ToString(), token);
                 _logger.Information("Transcription saved to {textFile}", textFile);
+                callback(new FileInfo(textFile));
             }
         }
     }

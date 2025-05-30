@@ -32,7 +32,8 @@ namespace WhisperCLI
             using var processor = CreateProcessor(options.Model, whisperModelInfo, logger);
             if (string.IsNullOrWhiteSpace(options.InputFilePath))
             {
-                await new MicrophoneTranscriber(logger, options.MicrophoneIndex).TranscribeAudioAsync(processor, cts.Token);
+                await new MicrophoneTranscriber(logger, options.MicrophoneIndex)
+                    .TranscribeAudioAsync(processor, OpenFile, cts.Token);
             }
             else
             {
@@ -43,6 +44,29 @@ namespace WhisperCLI
                     return;
                 }
                 await new FileTranscriber(logger).TranscribeAudioAsync(inputFile, processor, cts.Token);
+            }
+        }
+
+        private static void OpenFile(FileInfo fileInfo)
+        {
+            if (fileInfo.Exists)
+            {
+                try
+                {
+                    Process.Start(new ProcessStartInfo
+                    {
+                        FileName = fileInfo.FullName,
+                        UseShellExecute = true
+                    });
+                }
+                catch (Exception ex)
+                {
+                    Log.Logger.Error(ex, "Failed to open file: {filePath}", fileInfo.FullName);
+                }
+            }
+            else
+            {
+                Log.Logger.Error("File does not exist: {filePath}", fileInfo.FullName);
             }
         }
 
