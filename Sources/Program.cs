@@ -15,7 +15,7 @@ namespace WhisperCLI
     {
         public static async Task Main(string[] args)
         {
-            const GgmlType defaultModel = GgmlType.LargeV3Turbo;
+            AppOptions options = CommandLine.Parser.Default.ParseArguments<AppOptions>(args).Value;
             Console.OutputEncoding = Encoding.UTF8;
             CancellationTokenSource cts = new();
             Logger logger = new LoggerConfiguration()
@@ -29,15 +29,6 @@ namespace WhisperCLI
                     logger.Debug("[Whisper] [{level}] {text}", level.ToString().ToUpperInvariant(), text.Trim());
                 }
             });
-            if (args.Length < 1)
-            {
-                logger.Error("Usage: WhisperCLI <inputFilePath> [modelType]");
-                logger.Error("Available models: {models}", string.Join(", ", Enum.GetNames<GgmlType>()));
-                logger.Error("Default model: {defaultModel}", defaultModel);
-                logger.Error("Example: WhisperCLI audio.mp3");
-                logger.Error("Example: WhisperCLI audio.mp3 {defaultModel}", defaultModel);
-                return;
-            }
             string inputFilePath = args[0];
             FileInfo inputFile = new(inputFilePath);
             if (!inputFile.Exists)
@@ -45,7 +36,7 @@ namespace WhisperCLI
                 logger.Error("Input file does not exist: {inputFilePath}", inputFilePath);
                 return;
             }
-            GgmlType model = args.Length > 1 && Enum.TryParse<GgmlType>(args[1], true, out var parsedType) ? parsedType : defaultModel;
+            GgmlType model = args.Length > 1 && Enum.TryParse<GgmlType>(args[1], true, out var parsedType) ? parsedType : options.Model;
             await TranscribeAudioAsync(inputFile, model, logger, cts.Token);
         }
 
