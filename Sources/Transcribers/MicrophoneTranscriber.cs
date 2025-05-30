@@ -1,19 +1,21 @@
-﻿using Serilog;
-using NAudio.Wave;
+﻿using EchoSharp.Abstractions.SpeechTranscription;
 using EchoSharp.NAudio;
-using System.Globalization;
-using EchoSharp.Whisper.net;
 using EchoSharp.Onnx.SileroVad;
 using EchoSharp.SpeechTranscription;
-using EchoSharp.Abstractions.SpeechTranscription;
+using EchoSharp.Whisper.net;
+using NAudio.Wave;
+using Serilog;
+using System.Globalization;
+using System.Reflection;
+using Whisper.net;
 
 namespace WhisperCLI.Transcribers
 {
     public class MicrophoneTranscriber
     {
         private readonly ILogger _logger;
-        private readonly IRealtimeSpeechTranscriptor _transcriptor;
         private readonly MicrophoneInputSource _micSource;
+        private readonly IRealtimeSpeechTranscriptor _transcriptor;
 
         public MicrophoneTranscriber(ILogger logger, string whisperModelPath, string sileroVadModelPath, int microphoneIndex)
         {
@@ -40,10 +42,11 @@ namespace WhisperCLI.Transcribers
             _logger.Information("Using microphone {index}: {name}", microphoneIndex, WaveInEvent.GetCapabilities(microphoneIndex).ProductName);
             var vadFactory = new SileroVadDetectorFactory(new SileroVadOptions(sileroVadModelPath)
             {
-                Threshold = 0.5f
+                Threshold = 0.2f
             });
-
-            var speechFactory = new WhisperSpeechTranscriptorFactory(whisperModelPath);
+            WhisperFactory whisperFactory = WhisperFactory.FromPath(whisperModelPath);
+            var whisperProcessorBuilder = whisperFactory.CreateBuilder().WithLanguage("auto");
+            var speechFactory = new WhisperSpeechTranscriptorFactory(builder: whisperProcessorBuilder);
             var realtimeFactory = new EchoSharpRealtimeTranscriptorFactory(speechFactory, vadFactory);
             _transcriptor = realtimeFactory.Create(new RealtimeSpeechTranscriptorOptions
             {
