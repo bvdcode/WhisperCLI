@@ -1,80 +1,98 @@
-﻿using EchoSharp.Abstractions.SpeechTranscription;
-using EchoSharp.NAudio;
-using EchoSharp.Onnx.SileroVad;
-using EchoSharp.SpeechTranscription;
-using EchoSharp.Whisper.net;
+﻿using Serilog;
 using NAudio.Wave;
-using Serilog;
-using System.Globalization;
-using System.Reflection;
 using Whisper.net;
+using System.Text;
 
 namespace WhisperCLI.Transcribers
 {
     public class MicrophoneTranscriber
     {
         private readonly ILogger _logger;
-        private readonly MicrophoneInputSource _micSource;
-        private readonly IRealtimeSpeechTranscriptor _transcriptor;
+        private readonly int _microphoneIndex;
 
-        public MicrophoneTranscriber(ILogger logger, string whisperModelPath, string sileroVadModelPath, int microphoneIndex)
+        public MicrophoneTranscriber(ILogger logger, int microphoneIndex)
         {
             _logger = logger;
-            int deviceCount = WaveInEvent.DeviceCount;
-            if (deviceCount == 0)
+            _microphoneIndex = microphoneIndex;
+            _logger.Information("Available audio input devices: {deviceCount}", WaveInEvent.DeviceCount);
+            if (WaveInEvent.DeviceCount == 0)
             {
-                _logger.Error("No audio input devices found.");
-                throw new InvalidOperationException("No microphone detected.");
+                _logger.Error("No audio input devices found. Please connect a microphone.");
+                throw new InvalidOperationException("No audio input devices found.");
             }
-
-            _logger.Information("Found {count} audio input device(s):", deviceCount);
-            for (int i = 0; i < deviceCount; i++)
+            if (microphoneIndex < 0 || microphoneIndex >= WaveInEvent.DeviceCount)
             {
-                var caps = WaveInEvent.GetCapabilities(i);
-                _logger.Information("  Device {index}: {name}", i, caps.ProductName);
+                _logger.Error("Invalid microphone index: {index}. Valid range is 0 to {deviceCount}.", microphoneIndex, WaveInEvent.DeviceCount - 1);
+                throw new ArgumentOutOfRangeException(nameof(microphoneIndex), "Invalid microphone index.");
             }
-
-            if (microphoneIndex < 0 || microphoneIndex >= deviceCount)
-            {
-                _logger.Error("Invalid microphoneIndex {idx}. Valid range is 0–{max}.", microphoneIndex, deviceCount - 1);
-                throw new ArgumentOutOfRangeException(nameof(microphoneIndex));
-            }
-            _logger.Information("Using microphone {index}: {name}", microphoneIndex, WaveInEvent.GetCapabilities(microphoneIndex).ProductName);
-            var vadFactory = new SileroVadDetectorFactory(new SileroVadOptions(sileroVadModelPath)
-            {
-                Threshold = 0.2f
-            });
-            WhisperFactory whisperFactory = WhisperFactory.FromPath(whisperModelPath);
-            var whisperProcessorBuilder = whisperFactory.CreateBuilder().WithLanguage("auto");
-            var speechFactory = new WhisperSpeechTranscriptorFactory(builder: whisperProcessorBuilder);
-            var realtimeFactory = new EchoSharpRealtimeTranscriptorFactory(speechFactory, vadFactory);
-            _transcriptor = realtimeFactory.Create(new RealtimeSpeechTranscriptorOptions
-            {
-                AutodetectLanguageOnce = false,
-                IncludeSpeechRecogizingEvents = false,
-                LanguageAutoDetect = true,
-                Language = CultureInfo.InvariantCulture
-            });
-            _micSource = new MicrophoneInputSource(deviceNumber: microphoneIndex);
+            _logger.Information("Using microphone[{index}]: {micName}", microphoneIndex, WaveInEvent.GetCapabilities(microphoneIndex).ProductName);
         }
 
-        public async Task TranscribeAudioAsync(CancellationToken token)
+        public async Task TranscribeAudioAsync(WhisperProcessor processor, CancellationToken token)
         {
             _logger.Information("Starting microphone recording...");
-            _micSource.StartRecording();
 
-            await foreach (var evt in _transcriptor.TranscribeAsync(_micSource, token))
+            var waveIn = new WaveInEvent
             {
-                if (evt is RealtimeSegmentRecognized rec)
+                DeviceNumber = _microphoneIndex,
+                WaveFormat = new WaveFormat(16000, 1)
+            };
+
+            string tempPath = Path.GetTempPath();
+            string workingDirectory = Path.Combine(tempPath, "WhisperCLI", "Models", "SileroVad");
+            var di = Directory.CreateDirectory(workingDirectory);
+            string wavOutputPath = Path.Combine(di.FullName, "recording-" + DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".wav");
+            using var waveWriter = new WaveFileWriter(wavOutputPath, waveIn.WaveFormat);
+            waveIn.DataAvailable += (s, a) =>
+            {
+                waveWriter.Write(a.Buffer, 0, a.BytesRecorded);
+            };
+            waveIn.StartRecording();
+            ConsoleKey stopKey = ConsoleKey.Spacebar;
+            _logger.Information("Press {stopKey} to stop recording.", stopKey);
+            CancellationTokenSource cts = new();
+            Console.CancelKeyPress += (s, e) =>
+            {
+                e.Cancel = true; // Prevent the process from terminating
+                cts.Cancel(); // Cancel the recording
+                _logger.Information("Recording cancellation requested.");
+            };
+            try
+            {
+                while (!token.IsCancellationRequested && !cts.IsCancellationRequested)
                 {
-                    var start = rec.Segment.StartTime.ToString(@"hh\:mm\:ss");
-                    var end = (rec.Segment.StartTime + rec.Segment.Duration).ToString(@"hh\:mm\:ss");
-                    _logger.Information("{start}-{end} — {text}", start, end, rec.Segment.Text);
+                    await Task.Delay(100, token);
                 }
             }
+            catch (TaskCanceledException) { }
 
-            _logger.Information("Stopping microphone recording...");
-            _micSource.StopRecording();
+            waveIn.StopRecording();
+            waveWriter.Dispose();
+            waveIn.Dispose();
+
+            _logger.Information("Recording stopped. Transcribing...");
+            using var audioStream = new MemoryStream(File.ReadAllBytes(wavOutputPath));
+            StringBuilder sb = new();
+            await foreach (var res in processor.ProcessAsync(audioStream, token))
+            {
+                _logger.Information("{lang}: {start}-{end} — {text}",
+                    res.Language,
+                    res.Start.ToString(@"hh\:mm\:ss"),
+                    res.End.ToString(@"hh\:mm\:ss"),
+                    res.Text);
+                sb.Append(res.Text);
+                if (token.IsCancellationRequested)
+                {
+                    break;
+                }
+            }
+            _logger.Information("Transcription completed - wave file saved to {wavOutputPath}", wavOutputPath);
+            if (sb.Length > 0)
+            {
+                string textFile = Path.Combine(di.FullName, "transcription-" + DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".txt");
+                await File.WriteAllTextAsync(textFile, sb.ToString(), token);
+                _logger.Information("Transcription saved to {textFile}", textFile);
+            }
         }
     }
 }
