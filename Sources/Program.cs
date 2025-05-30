@@ -1,5 +1,4 @@
 ﻿using Serilog;
-using Xabe.FFmpeg;
 using System.Text;
 using Whisper.net;
 using Serilog.Core;
@@ -7,7 +6,6 @@ using Serilog.Events;
 using Whisper.net.Ggml;
 using Whisper.net.Logger;
 using System.Diagnostics;
-using Xabe.FFmpeg.Downloader;
 using WhisperCLI.Transcribers;
 
 namespace WhisperCLI
@@ -30,15 +28,21 @@ namespace WhisperCLI
                     logger.Debug("[Whisper] [{level}] {text}", level.ToString().ToUpperInvariant(), text.Trim());
                 }
             });
-            string inputFilePath = args[0];
-            FileInfo inputFile = new(inputFilePath);
-            if (!inputFile.Exists)
-            {
-                logger.Error("Input file does not exist: {inputFilePath}", inputFilePath);
-                return;
-            }
             using var processor = await CreateProcessorAsync(options.Model, logger, cts.Token);
-            await new FileTranscriber(logger).TranscribeAudioAsync(inputFile, processor, cts.Token);
+            if (string.IsNullOrWhiteSpace(options.InputFilePath))
+            {
+                await new MicrophoneTranscriber(logger).TranscribeAudioAsync(processor, cts.Token);
+            }
+            else
+            {
+                FileInfo inputFile = new(options.InputFilePath);
+                if (!inputFile.Exists)
+                {
+                    logger.Error("Input file does not exist: {inputFilePath}", options.InputFilePath);
+                    return;
+                }
+                await new FileTranscriber(logger).TranscribeAudioAsync(inputFile, processor, cts.Token);
+            }
         }
 
         private static async Task<WhisperProcessor> CreateProcessorAsync(GgmlType model, Logger logger, CancellationToken token)
