@@ -12,5 +12,8 @@ namespace WhisperCLI
 
         [Value(1, Required = false, HelpText = "Path to the input audio file to transcribe.")]
         public string InputFilePath { get; set; } = string.Empty;
+
+        [Option('i', "microphone-index", Required = false, Default = 0, HelpText = "Index of the microphone to use for recording. Default is 0 (first microphone).")]
+        public int MicrophoneIndex { get; set; }
     }
 }

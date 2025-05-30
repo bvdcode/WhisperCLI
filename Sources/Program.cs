@@ -31,7 +31,7 @@ namespace WhisperCLI
             using var processor = await CreateProcessorAsync(options.Model, logger, cts.Token);
             if (string.IsNullOrWhiteSpace(options.InputFilePath))
             {
-                await new MicrophoneTranscriber(logger).TranscribeAudioAsync(processor, cts.Token);
+                await new MicrophoneTranscriber(logger, options.MicrophoneIndex).TranscribeAudioAsync(processor, cts.Token);
             }
             else
             {
