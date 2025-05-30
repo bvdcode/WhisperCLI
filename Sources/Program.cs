@@ -32,18 +32,9 @@ namespace WhisperCLI
             using var processor = CreateProcessor(options.Model, whisperModelInfo, logger);
             if (string.IsNullOrWhiteSpace(options.InputFilePath))
             {
-                ConsoleKey stopKey = ConsoleKey.Spacebar;
-                logger.Information("Press {stopKey} to stop recording.", stopKey);
-                CancellationTokenSource recordingCts = new();
-                Console.CancelKeyPress += (s, e) =>
-                {
-                    e.Cancel = true;
-                    recordingCts.Cancel();
-                    logger.Information("Recording cancellation requested.");
-                };
-
+                logger.Information("Press {stopKey} to stop recording.", options.StopKey);
                 await new MicrophoneTranscriber(logger, options.MicrophoneIndex)
-                    .TranscribeAudioAsync(processor, OpenFile, cts.Token, recordingCts.Token);
+                    .TranscribeAudioAsync(processor, OpenFile, () => CheckCancellation(options.StopKey), cts.Token);
                 await Task.Delay(10_000);
             }
             else
@@ -56,6 +47,16 @@ namespace WhisperCLI
                 }
                 await new FileTranscriber(logger).TranscribeAudioAsync(inputFile, processor, cts.Token);
             }
+        }
+
+        private static bool CheckCancellation(ConsoleKey stopKey)
+        {
+            if (Console.KeyAvailable)
+            {
+                ConsoleKey key = Console.ReadKey(true).Key;
+                return key == stopKey;
+            }
+            return false;
         }
 
         private static void OpenFile(FileInfo fileInfo)

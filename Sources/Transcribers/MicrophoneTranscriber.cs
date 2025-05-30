@@ -28,7 +28,7 @@ namespace WhisperCLI.Transcribers
             _logger.Information("Using microphone[{index}]: {micName}", microphoneIndex, WaveInEvent.GetCapabilities(microphoneIndex).ProductName);
         }
 
-        public async Task TranscribeAudioAsync(WhisperProcessor processor, Action<FileInfo> callback, CancellationToken token, CancellationToken stopRecordingToken)
+        public async Task TranscribeAudioAsync(WhisperProcessor processor, Action<FileInfo> callback, Func<bool> stopRecording, CancellationToken token)
         {
             _logger.Information("Starting microphone recording...");
 
@@ -39,7 +39,7 @@ namespace WhisperCLI.Transcribers
             };
 
             string tempPath = Path.GetTempPath();
-            string workingDirectory = Path.Combine(tempPath, "WhisperCLI", "Models", "SileroVad");
+            string workingDirectory = Path.Combine(tempPath, "WhisperCLI", "Recordings");
             var di = Directory.CreateDirectory(workingDirectory);
             string wavOutputPath = Path.Combine(di.FullName, "recording-" + DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".wav");
             using var waveWriter = new WaveFileWriter(wavOutputPath, waveIn.WaveFormat);
@@ -48,9 +48,15 @@ namespace WhisperCLI.Transcribers
                 waveWriter.Write(a.Buffer, 0, a.BytesRecorded);
             };
             waveIn.StartRecording();
-            while (!token.IsCancellationRequested && !stopRecordingToken.IsCancellationRequested)
+            while (!token.IsCancellationRequested)
             {
-                await Task.Delay(100, token);
+                bool stop = stopRecording?.Invoke() ?? false;
+                if (stop)
+                {
+                    _logger.Information("Recording stopped by user request.");
+                    break;
+                }
+                await Task.Delay(100, token); // Check for stop condition every 100ms
             }
 
             waveIn.StopRecording();
@@ -76,10 +82,14 @@ namespace WhisperCLI.Transcribers
             _logger.Information("Transcription completed - wave file saved to {wavOutputPath}", wavOutputPath);
             if (sb.Length > 0)
             {
-                string textFile = Path.Combine(di.FullName, "transcription-" + DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".txt");
+                string textFile = Path.ChangeExtension(wavOutputPath, ".txt");
                 await File.WriteAllTextAsync(textFile, sb.ToString(), token);
                 _logger.Information("Transcription saved to {textFile}", textFile);
                 callback(new FileInfo(textFile));
+            }
+            else
+            {
+                _logger.Warning("No transcription results found. The audio may be too short or silent.");
             }
         }
     }

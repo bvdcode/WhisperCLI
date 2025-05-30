@@ -15,5 +15,8 @@ namespace WhisperCLI
 
         [Option('i', "microphone-index", Required = false, Default = 0, HelpText = "Index of the microphone to use for recording. Default is 0 (first microphone).")]
         public int MicrophoneIndex { get; set; }
+
+        [Option('s', "stop-key", Required = false, Default = ConsoleKey.Spacebar, HelpText = "Key to stop recording when using microphone input. Default is 'Space'.")]
+        public ConsoleKey StopKey { get; set; }
     }
 }
