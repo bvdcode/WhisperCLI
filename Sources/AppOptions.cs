@@ -28,6 +28,9 @@ namespace WhisperCLI
         [Option('d', "delay-seconds", Required = false, Default = 10, HelpText = "Delay in seconds after transcription before closing the application. Default is 10 seconds.")]
         public int DelaySeconds { get; set; }
 
+        [Option('l', "lockfile", Required = false, Default = true, HelpText = "Use a lockfile to prevent multiple instances from running simultaneously. Default is true.")]
+        public bool UseLockfile { get; set; }
+
         [Option('v', "verbose", Required = false, Default = false, HelpText = "Enable verbose logging.")]
         public bool Verbose { get; set; }
     }

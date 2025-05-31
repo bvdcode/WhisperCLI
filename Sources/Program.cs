@@ -18,6 +18,11 @@ namespace WhisperCLI
             ArgumentOutOfRangeException.ThrowIfNegative(options.DelaySeconds, "Delay seconds must be non-negative.");
             Console.OutputEncoding = Encoding.UTF8;
             CancellationTokenSource cts = new();
+            Console.CancelKeyPress += (s, e) =>
+            {
+                e.Cancel = true; // Prevent the process from terminating immediately
+                cts.Cancel(); // Signal cancellation
+            };
             Logger logger = new LoggerConfiguration()
                 .MinimumLevel.Is(options.Verbose ? LogEventLevel.Debug : LogEventLevel.Information)
                 .WriteTo.Console()
@@ -29,6 +34,11 @@ namespace WhisperCLI
                     logger.Debug("[Whisper] [{level}] {text}", level.ToString().ToUpperInvariant(), text.Trim());
                 }
             });
+            if (CheckLockfile(logger))
+            {
+                await Task.Delay(options.DelaySeconds * 1000, cts.Token);
+                return;
+            }
             FileInfo whisperModelInfo = await GetWhisperModelPathAsync(options.Model, logger, cts.Token);
             using var processor = CreateProcessor(options.Model, whisperModelInfo, logger);
             FileInfo result;
@@ -66,7 +76,38 @@ namespace WhisperCLI
                     logger.Error(ex, "Failed to copy transcription result to clipboard.");
                 }
             }
-            await Task.Delay(options.DelaySeconds * 1000);
+            await Task.Delay(options.DelaySeconds * 1000, cts.Token);
+        }
+
+        private static bool CheckLockfile(Logger logger)
+        {
+            string tempPath = Path.GetTempPath();
+            string workingDirectory = Path.Combine(tempPath, "WhisperCLI");
+            var di = Directory.CreateDirectory(workingDirectory);
+            string lockFilePath = Path.Combine(di.FullName, "whisper.lock");
+            if (File.Exists(lockFilePath))
+            {
+                logger.Warning("Lock file exists. WhisperCLI may already be running.");
+                return true;
+            }
+            try
+            {
+                using (File.Create(lockFilePath)) { }
+                logger.Debug("Lock file created: {lockFilePath}", lockFilePath);
+                return false;
+            }
+            catch (IOException ex)
+            {
+                logger.Error(ex, "Failed to create lock file: {lockFilePath}", lockFilePath);
+                return true;
+            }
+            finally
+            {
+                // Ensure the lock file is deleted on exit
+                AppDomain.CurrentDomain.ProcessExit += (s, e) => File.Delete(lockFilePath);
+                AppDomain.CurrentDomain.UnhandledException += (s, e) => File.Delete(lockFilePath);
+                Console.CancelKeyPress += (s, e) => File.Delete(lockFilePath);
+            }
         }
 
         private static bool CheckCancellation(ConsoleKey stopKey)
