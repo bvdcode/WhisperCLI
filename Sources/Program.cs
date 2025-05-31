@@ -191,6 +191,7 @@ namespace WhisperCLI
             try
             {
                 WhisperFactory whisperFactory = WhisperFactory.FromPath(whisperModelInfo.FullName);
+                logger.Information("Runtime: {runtime}, Model: {model}", WhisperFactory.GetRuntimeInfo(), model.ToString().ToLower());
                 logger.Information("WhisperProcessor created: {model}", model);
                 return whisperFactory
                     .CreateBuilder()
