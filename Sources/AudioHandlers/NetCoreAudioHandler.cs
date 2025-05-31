@@ -1,26 +1,20 @@
-using System;
-using System.Threading.Tasks;
 using NetCoreAudio.Interfaces;
 using NetCoreAudio.Players;
 using NetCoreAudio.Recorders;
 using NetCoreAudio;
-using Bagheera.Transcriber;
-using Bagheera.Transcriber.Models;
 
 
-namespace Bagheera.Core
+namespace WhisperCLI.AudioHandlers
 {
     public class AudioHandler
     {
         private readonly Player _audioPlayer;
         private readonly Recorder _audioRecorder;
-        private readonly WhisperTranscriber _transcriber;
         private readonly string _directoryPath;
         private readonly string _lastRecordingPath;
         private readonly string newLine = Environment.NewLine;
         public bool Recording { get; private set; }
         public bool Playing { get; private set; }
-        public bool Transcribing { get; private set; }
         public TaskCompletionSource<bool>? PlaybackFinishedTcs;
 
         public AudioHandler(string directoryPath)
@@ -32,40 +26,6 @@ namespace Bagheera.Core
             _audioPlayer = new Player();
             _audioPlayer.PlaybackFinished += (sender, e) => PlaybackFinishedTcs!.SetResult(true);
             _audioRecorder = new Recorder();
-            _transcriber = new WhisperTranscriber(_directoryPath);
-        }
-        public string ListAllModels()
-        {
-            return _transcriber.WhisperModelManager.GetModelsInfo();
-        }
-
-        public string GetCurrentModelInfo()
-        {
-            return _transcriber.Model.ToString();
-        }
-
-        public string GetCurrentModelName()
-        {
-            return _transcriber.Model.Name;
-        }
-
-        public string GetModelSizeByModelName(string modelName)
-        {
-            return _transcriber.WhisperModelManager.ModelList.Find(x => x.Name == modelName)!.Size;
-        }
-
-        public bool IsModelInstalled(string modelName)
-        {
-            return _transcriber.WhisperModelManager.ModelList.Find(x => x.Name == modelName)!.IsInstalled;
-        }
-
-        public bool ModelExists(string modelName)
-        {
-            if (_transcriber.WhisperModelManager.ModelList.Find(x => x.Name == modelName) != null)
-            {
-                return true;
-            }
-            return false;
         }
 
         public void Stop()
@@ -85,27 +45,6 @@ namespace Bagheera.Core
             await _audioRecorder.Record(_lastRecordingPath);
         }
 
-        public async Task<string> Transcribe()
-        {
-            var result = await _transcriber.TranscribeAsync(_lastRecordingPath);
-            return result;
-        }
-
-        public void SetModel(string modelName)
-        {
-            _transcriber.SetModel(modelName);
-        }
-
-        public async Task InstallModel(string modelName)
-        {
-            await _transcriber.InstallModel(modelName);
-        }
-
-        public void InstallAllModels()
-        {
-            _transcriber.InstallAllModels();
-        }
-
         public async Task StopProcess()
         {
             if (_audioRecorder.Recording)
@@ -116,11 +55,6 @@ namespace Bagheera.Core
             {
                 await _audioPlayer.Stop();
             }
-            if (_transcriber.Transcribing)
-            {
-                await _transcriber.Stop();
-            }
-        }
 
         public async Task Play()
         {
