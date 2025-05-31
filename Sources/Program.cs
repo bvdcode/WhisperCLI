@@ -18,7 +18,7 @@ namespace WhisperCLI
             Console.OutputEncoding = Encoding.UTF8;
             CancellationTokenSource cts = new();
             Logger logger = new LoggerConfiguration()
-                .MinimumLevel.Is(Debugger.IsAttached ? LogEventLevel.Debug : LogEventLevel.Information)
+                .MinimumLevel.Is(options.Verbose ? LogEventLevel.Debug : LogEventLevel.Information)
                 .WriteTo.Console()
                 .CreateLogger();
             LogProvider.AddLogger((level, text) =>
@@ -65,6 +65,7 @@ namespace WhisperCLI
                     logger.Error(ex, "Failed to copy transcription result to clipboard.");
                 }
             }
+            await Task.Delay(options.DelaySeconds * 1000);
         }
 
         private static bool CheckCancellation(ConsoleKey stopKey)
