@@ -55,8 +55,29 @@ namespace WhisperCLI.Transcribers
             }
         }
 
+        private async Task<MemoryStream> ConvertWavTo16BitMonoAsync(FileInfo inputFile)
+        {
+            _logger.Information("Converting media to 16-bit mono: {inputFile}", inputFile.FullName);
+            string targetFile = Path.ChangeExtension(inputFile.FullName, ".wav");
+            var conversion = await FFmpeg.Conversions.FromSnippet.Convert(inputFile.FullName, targetFile);
+            conversion.AddParameter("-ac 1", ParameterPosition.PostInput)
+                      .AddParameter("-ar 16000", ParameterPosition.PostInput)
+                      .AddParameter("-sample_fmt s16", ParameterPosition.PostInput);
+
+            conversion.OnProgress += (sender, args) =>
+            {
+                _logger.Information("Converting media to 16-bit mono: {argsPercent}%", args.Percent);
+            };
+            await conversion.Start();
+            byte[] bytes = File.ReadAllBytes(targetFile);
+            MemoryStream ms = new(bytes);
+            File.Delete(targetFile);
+            return ms;
+        }
+
         private async Task<MemoryStream> ConvertToWaveStreamAsync(FileInfo inputFile)
         {
+            _logger.Information("Converting media to wave: {inputFile}", inputFile.FullName);
             string targetFile = Path.ChangeExtension(inputFile.FullName, ".wav");
             bool isVideo = inputFile.Extension.Equals(".mp4", StringComparison.OrdinalIgnoreCase) ||
                            inputFile.Extension.Equals(".mkv", StringComparison.OrdinalIgnoreCase) ||
@@ -66,6 +87,8 @@ namespace WhisperCLI.Transcribers
                 : await FFmpeg.Conversions.FromSnippet.Convert(inputFile.FullName, targetFile);
 
             conversion.AddParameter("-ar 16000", ParameterPosition.PostInput);
+            conversion.AddParameter("-ac 1", ParameterPosition.PostInput);
+            conversion.AddParameter("-sample_fmt s16", ParameterPosition.PostInput);
             conversion.OnProgress += (sender, args) =>
             {
                 _logger.Information("Converting media to wave: {argsPercent}%", args.Percent);
