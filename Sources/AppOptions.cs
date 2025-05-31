@@ -6,8 +6,7 @@ namespace WhisperCLI
     public class AppOptions
     {
         [Option('m', "model", Required = false, Default = GgmlType.LargeV3Turbo,
-            HelpText = "Model to use for transcription. Default is 'large-v3-turbo'. Available models: " +
-            "'tiny', 'base', 'small', 'medium', 'large-v1', 'large-v2', 'large-v3-turbo'.")]
+            HelpText = "Model to use for transcription. Default is 'LargeV3Turbo'. Available models: 'Tiny', 'TinyEn', 'Base', 'BaseEn', 'Small', 'SmallEn', 'Medium', 'MediumEn', 'LargeV1', 'LargeV2', 'LargeV3', 'LargeV3Turbo'.")]
         public GgmlType Model { get; set; }
 
         [Value(1, Required = false, HelpText = "Path to the input audio file to transcribe.")]
