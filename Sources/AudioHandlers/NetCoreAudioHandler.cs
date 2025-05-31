@@ -38,6 +38,11 @@ namespace WhisperCLI.AudioHandlers
             }
         }
 
+        public string GetLastRecordingPath()
+        {
+            return _lastRecordingPath;
+        }
+
         public async Task Record()
         {
             await _audioRecorder.Record(_lastRecordingPath);
