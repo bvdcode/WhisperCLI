@@ -15,6 +15,7 @@ namespace WhisperCLI
         public static async Task Main(string[] args)
         {
             AppOptions options = CommandLine.Parser.Default.ParseArguments<AppOptions>(args).Value;
+            ArgumentOutOfRangeException.ThrowIfNegative(options.DelaySeconds, "Delay seconds must be non-negative.");
             Console.OutputEncoding = Encoding.UTF8;
             CancellationTokenSource cts = new();
             Logger logger = new LoggerConfiguration()
