@@ -50,11 +50,14 @@ namespace WhisperCLI.AudioHandlers
             if (_audioRecorder.Recording)
             {
                 await _audioRecorder.Stop();
+                Recording = false;
             }
             if (_audioPlayer.Playing)
             {
                 await _audioPlayer.Stop();
+                Playing = false;
             }
+        }
 
         public async Task Play()
         {
