@@ -42,11 +42,28 @@ namespace WhisperCLI
             FileInfo whisperModelInfo = await GetWhisperModelPathAsync(options.Model, logger, cts.Token);
             using var processor = CreateProcessor(options.Model, whisperModelInfo, logger);
             FileInfo result;
+
+            // Get OS type
+            string osType = Environment.OSVersion.Platform.ToString();
+            logger.Information("Operating System: {osType}", osType);
             if (string.IsNullOrWhiteSpace(options.InputFilePath))
             {
                 logger.Information("Press {stopKey} to stop recording.", options.StopKey);
-                result = await new MicrophoneTranscriber(logger, options.MicrophoneIndex)
-                    .TranscribeAudioAsync(processor, () => CheckCancellation(options.StopKey), cts.Token);
+                if (osType == "Unix")
+                {
+                    result = await new NetCoreAudioMicrophoneTranscriber(logger, options.MicrophoneIndex)
+                        .TranscribeAudioAsync(processor, () => CheckCancellation(options.StopKey), cts.Token);
+                }
+                else if (osType == "Win32NT")
+                {
+                    result = await new MicrophoneTranscriber(logger, options.MicrophoneIndex)
+                        .TranscribeAudioAsync(processor, () => CheckCancellation(options.StopKey), cts.Token);
+                }
+                else
+                {
+                    logger.Error("Unsupported operating system: {osType}. Only Windows and Unix-like systems tested.", osType);
+                    return;
+                }
             }
             else
             {
