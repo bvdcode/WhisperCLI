@@ -47,9 +47,9 @@ namespace WhisperCLI.Transcribers
             string wavOutputPath = _audioHandler.GetLastRecordingPath();
             FileInfo wavFileInfo = new FileInfo(wavOutputPath);
 
-            var FileTranscriber = new FileTranscriber(_logger);
+            var fileTranscriber = new FileTranscriber(_logger);
 
-            var testFileInfo = await FileTranscriber.TranscribeAudioAsync(wavFileInfo, processor, token);
+            var testFileInfo = await fileTranscriber.TranscribeAudioAsync(wavFileInfo, processor, token);
             
             return testFileInfo;
         }
