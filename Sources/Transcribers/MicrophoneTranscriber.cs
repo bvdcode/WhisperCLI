@@ -2,10 +2,11 @@
 using NAudio.Wave;
 using Whisper.net;
 using System.Text;
+using WhisperCLI.Transcribers;
 
 namespace WhisperCLI.Transcribers
 {
-    public class MicrophoneTranscriber
+    public class MicrophoneTranscriber : IMicrophoneTranscriber
     {
         private readonly ILogger _logger;
         private readonly int _microphoneIndex;
