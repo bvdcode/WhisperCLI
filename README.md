@@ -17,6 +17,11 @@ WhisperCLI is a command-line tool for transcribing audio from files or microphon
 
 - .NET 9.0
 
+# If running on Linux
+
+- xsel
+- aplay, amixer, arecord (refer to https://github.com/mobiletechtracker/NetCoreAudio)
+
 ## Installation
 
 ### Using Published Release
