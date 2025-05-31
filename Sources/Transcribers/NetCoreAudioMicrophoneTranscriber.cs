@@ -45,35 +45,13 @@ namespace WhisperCLI.Transcribers
             _logger.Information("Recording stopped. Transcribing...");
 
             string wavOutputPath = _audioHandler.GetLastRecordingPath();
+            FileInfo wavFileInfo = new FileInfo(wavOutputPath);
+
+            var FileTranscriber = new FileTranscriber(_logger);
+
+            var testFileInfo = await FileTranscriber.TranscribeAudioAsync(wavFileInfo, processor, token);
             
-            using var audioStream = new MemoryStream(File.ReadAllBytes(wavOutputPath));
-            StringBuilder sb = new();
-            await foreach (var res in processor.ProcessAsync(audioStream, token))
-            {
-                _logger.Information("{lang}: {start}-{end} — {text}",
-                    res.Language,
-                    res.Start.ToString(@"hh\:mm\:ss"),
-                    res.End.ToString(@"hh\:mm\:ss"),
-                    res.Text);
-                sb.Append(res.Text);
-                if (token.IsCancellationRequested)
-                {
-                    break;
-                }
-            }
-            _logger.Information("Transcription completed - wave file saved to {wavOutputPath}", wavOutputPath);
-            if (sb.Length > 0)
-            {
-                string textFile = Path.ChangeExtension(wavOutputPath, ".txt");
-                await File.WriteAllTextAsync(textFile, sb.ToString(), token);
-                _logger.Information("Transcription saved to {textFile}", textFile);
-                return new(textFile);
-            }
-            else
-            {
-                _logger.Warning("No transcription results found. The audio may be too short or silent.");
-                return new FileInfo(wavOutputPath); // Return the wav file even if no transcription was done
-            }
+            return testFileInfo;
         }
     }
 }
