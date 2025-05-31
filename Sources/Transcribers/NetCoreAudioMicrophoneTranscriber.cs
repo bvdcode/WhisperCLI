@@ -24,13 +24,17 @@ namespace WhisperCLI.Transcribers
             _audioHandler = new NetCoreAudioHandler(workingDirectory);
         }
 
-        public async Task<FileInfo> TranscribeAudioAsync(WhisperProcessor processor, Func<bool> stopRecording, CancellationToken token)
+        public async Task<FileInfo> TranscribeAudioAsync(
+            WhisperProcessor processor,
+            Func<bool> stopRecording,
+            CancellationToken recordingToken,
+            Func<bool> stopTranscription,
+            CancellationToken transcriptionToken)
         {
             _logger.Information("Starting microphone recording...");
-
             await _audioHandler.Record();
 
-            while (!token.IsCancellationRequested)
+            while (!recordingToken.IsCancellationRequested)
             {
                 bool stop = stopRecording?.Invoke() ?? false;
                 if (stop)
@@ -38,20 +42,30 @@ namespace WhisperCLI.Transcribers
                     _logger.Information("Recording stopped by user request.");
                     break;
                 }
-                await Task.Delay(100, token); // Check for stop condition every 100ms
+                await Task.Delay(100, recordingToken);
             }
-            await _audioHandler.StopProcess();
 
+            await _audioHandler.StopProcess();
             _logger.Information("Recording stopped. Transcribing...");
 
             string wavOutputPath = _audioHandler.GetLastRecordingPath();
-            FileInfo wavFileInfo = new FileInfo(wavOutputPath);
+            FileInfo wavFileInfo = new(wavOutputPath);
 
             var fileTranscriber = new FileTranscriber(_logger);
+            var textFileInfo = await fileTranscriber.TranscribeAudioAsync(wavFileInfo, processor, transcriptionToken);
 
-            var testFileInfo = await fileTranscriber.TranscribeAudioAsync(wavFileInfo, processor, token);
-            
-            return testFileInfo;
+            while (!transcriptionToken.IsCancellationRequested)
+            {
+                bool stop = stopTranscription?.Invoke() ?? false;
+                if (stop)
+                {
+                    _logger.Information("Transcription stopped by user request.");
+                    break;
+                }
+                await Task.Delay(100, transcriptionToken);
+            }
+
+            return textFileInfo;
         }
     }
 }

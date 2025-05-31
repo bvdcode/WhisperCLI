@@ -18,6 +18,7 @@ namespace WhisperCLI
             ArgumentOutOfRangeException.ThrowIfNegative(options.DelaySeconds, "Delay seconds must be non-negative.");
             Console.OutputEncoding = Encoding.UTF8;
             CancellationTokenSource cts = new();
+            CancellationTokenSource transcriptionCts = new();
             Console.CancelKeyPress += (s, e) =>
             {
                 e.Cancel = true; // Prevent the process from terminating immediately
@@ -52,7 +53,7 @@ namespace WhisperCLI
                 if (osType == "Unix")
                 {
                     result = await new NetCoreAudioMicrophoneTranscriber(logger, options.MicrophoneIndex)
-                        .TranscribeAudioAsync(processor, () => CheckCancellation(options.StopKey), cts.Token);
+                        .TranscribeAudioAsync(processor, () => CheckCancellation(options.StopKey), cts.Token, () => CheckCancellation(options.StopKey), transcriptionCts.Token);
                 }
                 else if (osType == "Win32NT")
                 {
