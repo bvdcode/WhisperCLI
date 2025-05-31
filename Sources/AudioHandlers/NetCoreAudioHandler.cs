@@ -6,18 +6,16 @@ using NetCoreAudio;
 
 namespace WhisperCLI.AudioHandlers
 {
-    public class AudioHandler
+    public class NetCoreAudioHandler
     {
         private readonly Player _audioPlayer;
         private readonly Recorder _audioRecorder;
         private readonly string _directoryPath;
         private readonly string _lastRecordingPath;
         private readonly string newLine = Environment.NewLine;
-        public bool Recording { get; private set; }
-        public bool Playing { get; private set; }
         public TaskCompletionSource<bool>? PlaybackFinishedTcs;
 
-        public AudioHandler(string directoryPath)
+        public NetCoreAudioHandler(string directoryPath)
         {
             _directoryPath = directoryPath;
 
@@ -50,12 +48,10 @@ namespace WhisperCLI.AudioHandlers
             if (_audioRecorder.Recording)
             {
                 await _audioRecorder.Stop();
-                Recording = false;
             }
             if (_audioPlayer.Playing)
             {
                 await _audioPlayer.Stop();
-                Playing = false;
             }
         }
 
