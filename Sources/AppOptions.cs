@@ -18,5 +18,11 @@ namespace WhisperCLI
 
         [Option('s', "stop-key", Required = false, Default = ConsoleKey.Spacebar, HelpText = "Key to stop recording when using microphone input. Default is 'Space'.")]
         public ConsoleKey StopKey { get; set; }
+
+        [Option('o', "open-results", Required = false, Default = false, HelpText = "Open the results text file after transcription.")]
+        public bool OpenTextFile { get; set; }
+
+        [Option('c', "copy-to-clipboard", Required = false, Default = true, HelpText = "Copy the transcription result to the clipboard.")]
+        public bool CopyToClipboard { get; set; }
     }
 }

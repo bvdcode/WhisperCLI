@@ -30,12 +30,12 @@ namespace WhisperCLI
             });
             FileInfo whisperModelInfo = await GetWhisperModelPathAsync(options.Model, logger, cts.Token);
             using var processor = CreateProcessor(options.Model, whisperModelInfo, logger);
+            FileInfo result;
             if (string.IsNullOrWhiteSpace(options.InputFilePath))
             {
                 logger.Information("Press {stopKey} to stop recording.", options.StopKey);
-                await new MicrophoneTranscriber(logger, options.MicrophoneIndex)
-                    .TranscribeAudioAsync(processor, OpenFile, () => CheckCancellation(options.StopKey), cts.Token);
-                await Task.Delay(10_000);
+                result = await new MicrophoneTranscriber(logger, options.MicrophoneIndex)
+                    .TranscribeAudioAsync(processor, () => CheckCancellation(options.StopKey), cts.Token);
             }
             else
             {
@@ -45,7 +45,25 @@ namespace WhisperCLI
                     logger.Error("Input file does not exist: {inputFilePath}", options.InputFilePath);
                     return;
                 }
-                await new FileTranscriber(logger).TranscribeAudioAsync(inputFile, processor, cts.Token);
+                result = await new FileTranscriber(logger)
+                    .TranscribeAudioAsync(inputFile, processor, cts.Token);
+            }
+            if (options.OpenTextFile)
+            {
+                OpenFile(result);
+            }
+            if (options.CopyToClipboard)
+            {
+                try
+                {
+                    string text = File.ReadAllText(result.FullName, Encoding.UTF8);
+                    TextCopy.ClipboardService.SetText(text);
+                    logger.Information("Transcription result copied to clipboard.");
+                }
+                catch (Exception ex)
+                {
+                    logger.Error(ex, "Failed to copy transcription result to clipboard.");
+                }
             }
         }
 
@@ -61,6 +79,7 @@ namespace WhisperCLI
 
         private static void OpenFile(FileInfo fileInfo)
         {
+
             if (fileInfo.Exists)
             {
                 try

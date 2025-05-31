@@ -28,7 +28,7 @@ namespace WhisperCLI.Transcribers
             _logger.Information("Using microphone[{index}]: {micName}", microphoneIndex, WaveInEvent.GetCapabilities(microphoneIndex).ProductName);
         }
 
-        public async Task TranscribeAudioAsync(WhisperProcessor processor, Action<FileInfo> callback, Func<bool> stopRecording, CancellationToken token)
+        public async Task<FileInfo> TranscribeAudioAsync(WhisperProcessor processor, Func<bool> stopRecording, CancellationToken token)
         {
             _logger.Information("Starting microphone recording...");
 
@@ -85,11 +85,12 @@ namespace WhisperCLI.Transcribers
                 string textFile = Path.ChangeExtension(wavOutputPath, ".txt");
                 await File.WriteAllTextAsync(textFile, sb.ToString(), token);
                 _logger.Information("Transcription saved to {textFile}", textFile);
-                callback(new FileInfo(textFile));
+                return new(textFile);
             }
             else
             {
                 _logger.Warning("No transcription results found. The audio may be too short or silent.");
+                return new FileInfo(wavOutputPath); // Return the wav file even if no transcription was done
             }
         }
     }
