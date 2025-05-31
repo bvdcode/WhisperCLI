@@ -191,6 +191,7 @@ namespace WhisperCLI
             try
             {
                 WhisperFactory whisperFactory = WhisperFactory.FromPath(whisperModelInfo.FullName);
+                logger.Information("Runtime: {runtime}, Model: {model}", WhisperFactory.GetRuntimeInfo(), model.ToString().ToLower());
                 logger.Information("WhisperProcessor created: {model}", model);
                 return whisperFactory
                     .CreateBuilder()
@@ -204,5 +205,49 @@ namespace WhisperCLI
                 throw;
             }
         }
+
+        public async Task<WhisperProcessor> CreateWhisperProcessorAsync()
+        {
+            string modelPath = "ggml-base.en.bin";
+
+            if (!File.Exists(modelPath))
+                throw new FileNotFoundException($"Model file not found: {modelPath}");
+
+            // Try CUDA first
+            try
+            {
+                var cudaParams = new WhisperFactoryOptions
+                {
+                    UseGpu = true,
+                };
+
+                var factory = WhisperFactory.FromPath(modelPath, cudaParams);
+                _logger.Information("Using CUDA backend for Whisper.");
+                return await factory.CreateProcessorAsync();
+            }
+            catch (Exception ex)
+            {
+                _logger.Warning("CUDA backend failed: {Error}. Falling back to CPU.", ex.Message);
+            }
+
+            // Fallback to CPU
+            try
+            {
+                var cpuParams = new WhisperFactoryOptions
+                {
+                    
+                };
+
+                var factory = WhisperFactory.FromPath(modelPath, cpuParams);
+                _logger.Information("Using CPU backend for Whisper.");
+                return await factory.CreateProcessorAsync();
+            }
+            catch (Exception ex)
+            {
+                _logger.Error("CPU backend also failed: {Error}", ex.Message);
+                throw;
+            }
+        }
+
     }
 }
