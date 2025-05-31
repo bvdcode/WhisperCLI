@@ -57,28 +57,50 @@ namespace WhisperCLI.Transcribers
 
         private async Task<MemoryStream> ConvertToWaveStreamAsync(FileInfo inputFile)
         {
-            _logger.Information("Converting media to wave: {inputFile}", inputFile.FullName);
-            string targetFile = Path.ChangeExtension(inputFile.FullName, ".wav");
-            bool isVideo = inputFile.Extension.Equals(".mp4", StringComparison.OrdinalIgnoreCase) ||
-                           inputFile.Extension.Equals(".mkv", StringComparison.OrdinalIgnoreCase) ||
-                           inputFile.Extension.Equals(".avi", StringComparison.OrdinalIgnoreCase);
-            var conversion = isVideo
-                ? await FFmpeg.Conversions.FromSnippet.ExtractAudio(inputFile.FullName, targetFile)
-                : await FFmpeg.Conversions.FromSnippet.Convert(inputFile.FullName, targetFile);
+            _logger.Information("Preparing WAV (16kHz, mono) from: {inputFile}", inputFile.FullName);
 
-            conversion.AddParameter("-ar 16000", ParameterPosition.PostInput);
-            conversion.AddParameter("-ac 1", ParameterPosition.PostInput);
-            conversion.AddParameter("-sample_fmt s16", ParameterPosition.PostInput);
-            conversion.OnProgress += (sender, args) =>
+            string tempOutputPath = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid()}.wav");
+
+            bool isWav = inputFile.Extension.Equals(".wav", StringComparison.OrdinalIgnoreCase);
+
+            var conversion = FFmpeg.Conversions.New();
+
+            if (isWav)
             {
-                _logger.Information("Converting media to wave: {argsPercent}%", args.Percent);
+                // Always resample WAV to match required spec
+                conversion.AddParameter($"-i \"{inputFile.FullName}\"", ParameterPosition.PreInput);
+            }
+            else
+            {
+                bool isVideo = inputFile.Extension.Equals(".mp4", StringComparison.OrdinalIgnoreCase) ||
+                            inputFile.Extension.Equals(".mkv", StringComparison.OrdinalIgnoreCase) ||
+                            inputFile.Extension.Equals(".avi", StringComparison.OrdinalIgnoreCase);
+
+                conversion = isVideo
+                    ? await FFmpeg.Conversions.FromSnippet.ExtractAudio(inputFile.FullName, tempOutputPath)
+                    : await FFmpeg.Conversions.FromSnippet.Convert(inputFile.FullName, tempOutputPath);
+            }
+
+            // Apply format settings
+            conversion.SetOutput(tempOutputPath);
+            conversion.AddParameter("-ar 16000", ParameterPosition.PostInput);       // 16 kHz
+            conversion.AddParameter("-ac 1", ParameterPosition.PostInput);           // mono
+            conversion.AddParameter("-sample_fmt s16", ParameterPosition.PostInput); // 16-bit signed
+
+            conversion.OnProgress += (s, args) =>
+            {
+                _logger.Information("Converting to WAV: {Percent}%", args.Percent);
             };
+
             await conversion.Start();
-            byte[] bytes = File.ReadAllBytes(targetFile);
+
+            byte[] bytes = await File.ReadAllBytesAsync(tempOutputPath);
             MemoryStream ms = new(bytes);
-            File.Delete(targetFile);
+            File.Delete(tempOutputPath);
+
             return ms;
         }
+
 
         public async Task<FileInfo> TranscribeAudioAsync(FileInfo inputFile, WhisperProcessor processor, CancellationToken token)
         {
