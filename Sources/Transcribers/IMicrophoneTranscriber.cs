@@ -1,7 +1,4 @@
-﻿using Serilog;
-using NAudio.Wave;
-using Whisper.net;
-using System.Text;
+﻿using Whisper.net;
 
 namespace WhisperCLI.Transcribers
 {
