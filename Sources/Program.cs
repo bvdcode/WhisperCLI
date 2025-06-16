@@ -40,7 +40,7 @@ namespace WhisperCLI
                 return;
             }
             FileInfo whisperModelInfo = await GetWhisperModelPathAsync(options.Model, logger, cts.Token);
-            using var processor = CreateProcessor(options.Model, whisperModelInfo, logger);
+            using var processor = CreateProcessor(options.Model, whisperModelInfo, logger, options.Language);
             FileInfo result;
             if (string.IsNullOrWhiteSpace(options.InputFilePath))
             {
@@ -168,16 +168,16 @@ namespace WhisperCLI
             return fileInfo;
         }
 
-        private static WhisperProcessor CreateProcessor(GgmlType model, FileInfo whisperModelInfo, Logger logger)
+        private static WhisperProcessor CreateProcessor(GgmlType model, FileInfo whisperModelInfo, Logger logger, string language)
         {
-            logger.Information("Creating WhisperProcessor...");
+            logger.Information("Creating WhisperProcessor with language: {language}, model: {model}...", language, model);
             try
             {
                 WhisperFactory whisperFactory = WhisperFactory.FromPath(whisperModelInfo.FullName);
                 logger.Information("WhisperProcessor created: {model}", model);
                 return whisperFactory
                     .CreateBuilder()
-                    .WithLanguage("auto")
+                    .WithLanguage(language)
                     .Build();
             }
             catch (Exception ex)
