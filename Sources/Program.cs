@@ -76,15 +76,22 @@ namespace WhisperCLI
                     logger.Error(ex, "Failed to copy transcription result to clipboard.");
                 }
             }
+            string lockFilePath = GetLockFileLocation();
+            File.Delete(lockFilePath);
             await Task.Delay(options.DelaySeconds * 1000, cts.Token);
         }
 
-        private static bool CheckLockfile(Logger logger)
+        private static string GetLockFileLocation()
         {
             string tempPath = Path.GetTempPath();
             string workingDirectory = Path.Combine(tempPath, "WhisperCLI");
             var di = Directory.CreateDirectory(workingDirectory);
-            string lockFilePath = Path.Combine(di.FullName, "whisper.lock");
+            return Path.Combine(di.FullName, "whisper.lock");
+        }
+
+        private static bool CheckLockfile(Logger logger)
+        {
+            string lockFilePath = GetLockFileLocation();
             if (File.Exists(lockFilePath))
             {
                 logger.Warning("Lock file exists. WhisperCLI may already be running.");
