@@ -40,13 +40,13 @@ namespace WhisperCLI
                 return;
             }
             FileInfo whisperModelInfo = await GetWhisperModelPathAsync(options.Model, logger, cts.Token);
-            using var processor = CreateProcessor(options.Model, whisperModelInfo, logger, options.Language);
+            var processorTask = CreateProcessorAsync(options.Model, whisperModelInfo, logger, options.Language);
             FileInfo result;
             if (string.IsNullOrWhiteSpace(options.InputFilePath))
             {
                 logger.Information("Press {stopKey} to stop recording.", options.StopKey);
                 result = await new MicrophoneTranscriber(logger, options.MicrophoneIndex)
-                    .TranscribeAudioAsync(processor, () => CheckCancellation(options.StopKey), cts.Token);
+                    .TranscribeAudioAsync(processorTask, () => CheckCancellation(options.StopKey), cts.Token);
             }
             else
             {
@@ -57,7 +57,7 @@ namespace WhisperCLI
                     return;
                 }
                 result = await new FileTranscriber(logger)
-                    .TranscribeAudioAsync(inputFile, processor, cts.Token);
+                    .TranscribeAudioAsync(inputFile, processorTask, cts.Token);
             }
             if (options.OpenTextFile)
             {
@@ -168,17 +168,20 @@ namespace WhisperCLI
             return fileInfo;
         }
 
-        private static WhisperProcessor CreateProcessor(GgmlType model, FileInfo whisperModelInfo, Logger logger, string language)
+        private static Task<WhisperProcessor> CreateProcessorAsync(GgmlType model, FileInfo whisperModelInfo, Logger logger, string language)
         {
             logger.Information("Creating WhisperProcessor with language: {language}, model: {model}...", language, model);
             try
             {
-                WhisperFactory whisperFactory = WhisperFactory.FromPath(whisperModelInfo.FullName);
-                logger.Information("WhisperProcessor created: {model}", model);
-                return whisperFactory
-                    .CreateBuilder()
-                    .WithLanguage(language)
-                    .Build();
+                return Task.Run(() =>
+                {
+                    WhisperFactory whisperFactory = WhisperFactory.FromPath(whisperModelInfo.FullName);
+                    logger.Information("WhisperProcessor loaded in background: {model}", model);
+                    return whisperFactory
+                        .CreateBuilder()
+                        .WithLanguage(language)
+                        .Build();
+                });
             }
             catch (Exception ex)
             {

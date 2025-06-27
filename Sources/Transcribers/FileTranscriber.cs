@@ -77,7 +77,7 @@ namespace WhisperCLI.Transcribers
             return ms;
         }
 
-        public async Task<FileInfo> TranscribeAudioAsync(FileInfo inputFile, WhisperProcessor processor, CancellationToken token)
+        public async Task<FileInfo> TranscribeAudioAsync(FileInfo inputFile, Task<WhisperProcessor> processorTask, CancellationToken token)
         {
             await CheckFfmpegAsync(token);
             MemoryStream waves = await ConvertToWaveStreamAsync(inputFile);
@@ -85,6 +85,7 @@ namespace WhisperCLI.Transcribers
             Stopwatch sw = Stopwatch.StartNew();
             string prev = string.Empty;
             _logger.Information("Starting transcription for {inputFile}", inputFile.Name);
+            using var processor = await processorTask.ConfigureAwait(false);
             await foreach (var result in processor.ProcessAsync(waves, token))
             {
                 if (result.Text == prev)
@@ -105,7 +106,6 @@ namespace WhisperCLI.Transcribers
             string textFilePath = Path.ChangeExtension(inputFile.FullName, ".txt");
             File.WriteAllText(textFilePath, sb.ToString(), Encoding.UTF8);
             _logger.Information("Transcription complete. Output saved to: {textFilePath}", textFilePath);
-            await processor.DisposeAsync();
             return new FileInfo(textFilePath);
         }
     }

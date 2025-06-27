@@ -28,7 +28,7 @@ namespace WhisperCLI.Transcribers
             _logger.Information("Using microphone[{index}]: {micName}", microphoneIndex, WaveInEvent.GetCapabilities(microphoneIndex).ProductName);
         }
 
-        public async Task<FileInfo> TranscribeAudioAsync(WhisperProcessor processor, Func<bool> stopRecording, CancellationToken token)
+        public async Task<FileInfo> TranscribeAudioAsync(Task<WhisperProcessor> processorTask, Func<bool> stopRecording, CancellationToken token)
         {
             _logger.Information("Starting microphone recording...");
 
@@ -66,6 +66,7 @@ namespace WhisperCLI.Transcribers
             _logger.Information("Recording stopped. Transcribing...");
             using var audioStream = new MemoryStream(File.ReadAllBytes(wavOutputPath));
             StringBuilder sb = new();
+            using var processor = await processorTask.ConfigureAwait(false);
             await foreach (var res in processor.ProcessAsync(audioStream, token))
             {
                 _logger.Information("{lang}: {start}-{end} — {text}",
