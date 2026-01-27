@@ -42,43 +42,50 @@ namespace WhisperCLI
             FileInfo whisperModelInfo = await GetWhisperModelPathAsync(options.Model, logger, cts.Token);
             var processorTask = CreateProcessorAsync(options.Model, whisperModelInfo, logger, options.Language);
             FileInfo result;
-            if (string.IsNullOrWhiteSpace(options.InputFilePath))
+            try
             {
-                logger.Information("Press {stopKey} to stop recording.", options.StopKey);
-                result = await new MicrophoneTranscriber(logger, options.MicrophoneIndex)
-                    .TranscribeAudioAsync(processorTask, options.SaveTranscript, () => CheckCancellation(options.StopKey), cts.Token);
-            }
-            else
-            {
-                FileInfo inputFile = new(options.InputFilePath);
-                if (!inputFile.Exists)
+                if (string.IsNullOrWhiteSpace(options.InputFilePath))
                 {
-                    logger.Error("Input file does not exist: {inputFilePath}", options.InputFilePath);
-                    return;
+                    logger.Information("Press {stopKey} to stop recording.", options.StopKey);
+                    result = await new MicrophoneTranscriber(logger, options.MicrophoneIndex)
+                        .TranscribeAudioAsync(processorTask, options.SaveTranscript, () => CheckCancellation(options.StopKey), cts.Token);
                 }
-                result = await new FileTranscriber(logger)
-                    .TranscribeAudioAsync(inputFile, processorTask, cts.Token);
-            }
-            if (options.OpenTextFile)
-            {
-                OpenFile(result);
-            }
-            if (options.CopyToClipboard)
-            {
-                try
+                else
                 {
-                    string text = File.ReadAllText(result.FullName, Encoding.UTF8);
-                    TextCopy.ClipboardService.SetText(text);
-                    logger.Information("Transcription result copied to clipboard.");
+                    FileInfo inputFile = new(options.InputFilePath);
+                    if (!inputFile.Exists)
+                    {
+                        logger.Error("Input file does not exist: {inputFilePath}", options.InputFilePath);
+                        return;
+                    }
+                    result = await new FileTranscriber(logger)
+                        .TranscribeAudioAsync(inputFile, processorTask, cts.Token);
                 }
-                catch (Exception ex)
+                if (options.OpenTextFile)
                 {
-                    logger.Error(ex, "Failed to copy transcription result to clipboard.");
+                    OpenFile(result);
                 }
+                if (options.CopyToClipboard)
+                {
+                    try
+                    {
+                        string text = File.ReadAllText(result.FullName, Encoding.UTF8);
+                        TextCopy.ClipboardService.SetText(text);
+                        logger.Information("Transcription result copied to clipboard.");
+                    }
+                    catch (Exception ex)
+                    {
+                        logger.Error(ex, "Failed to copy transcription result to clipboard.");
+                    }
+                }
+                string lockFilePath = GetLockFileLocation();
+                File.Delete(lockFilePath);
+                await Task.Delay(options.DelaySeconds * 1000, cts.Token);
             }
-            string lockFilePath = GetLockFileLocation();
-            File.Delete(lockFilePath);
-            await Task.Delay(options.DelaySeconds * 1000, cts.Token);
+            catch (TaskCanceledException)
+            {
+                logger.Information("Operation canceled by user.");
+            }
         }
 
         private static string GetLockFileLocation()
