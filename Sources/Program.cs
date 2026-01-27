@@ -34,7 +34,7 @@ namespace WhisperCLI
                     logger.Debug("[Whisper] [{level}] {text}", level.ToString().ToUpperInvariant(), text.Trim());
                 }
             });
-            if (CheckLockfile(logger))
+            if (options.UseLockfile && CheckLockfile(logger))
             {
                 await Task.Delay(options.DelaySeconds * 1000, cts.Token);
                 return;
@@ -46,7 +46,7 @@ namespace WhisperCLI
             {
                 logger.Information("Press {stopKey} to stop recording.", options.StopKey);
                 result = await new MicrophoneTranscriber(logger, options.MicrophoneIndex)
-                    .TranscribeAudioAsync(processorTask, () => CheckCancellation(options.StopKey), cts.Token);
+                    .TranscribeAudioAsync(processorTask, options.SaveTranscript, () => CheckCancellation(options.StopKey), cts.Token);
             }
             else
             {

@@ -28,7 +28,11 @@ namespace WhisperCLI.Transcribers
             _logger.Information("Using microphone[{index}]: {micName}", microphoneIndex, WaveInEvent.GetCapabilities(microphoneIndex).ProductName);
         }
 
-        public async Task<FileInfo> TranscribeAudioAsync(Task<WhisperProcessor> processorTask, Func<bool> stopRecording, CancellationToken token)
+        public async Task<FileInfo> TranscribeAudioAsync(
+            Task<WhisperProcessor> processorTask,
+            bool saveTranscript,
+            Func<bool> stopRecording,
+            CancellationToken token)
         {
             _logger.Information("Starting microphone recording...");
 
@@ -86,6 +90,16 @@ namespace WhisperCLI.Transcribers
                 string textFile = Path.ChangeExtension(wavOutputPath, ".txt");
                 await File.WriteAllTextAsync(textFile, sb.ToString(), token);
                 _logger.Information("Transcription saved to {textFile}", textFile);
+                if (saveTranscript)
+                {
+                    string path = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+                    string saveDirectory = Path.Combine(path, "WhisperCLI", "Transcripts");
+                    Directory.CreateDirectory(saveDirectory);
+                    string savedFilePath = Path.Combine(saveDirectory, Path.GetFileName(textFile));
+                    File.Copy(textFile, savedFilePath, true);
+                    // transcode audio to mp3 and copy as well
+
+                }
                 return new(textFile);
             }
             else

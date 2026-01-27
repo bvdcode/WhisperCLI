@@ -25,11 +25,14 @@ namespace WhisperCLI
         [Option('c', "copy-to-clipboard", Required = false, Default = true, HelpText = "Copy the transcription result to the clipboard.")]
         public bool CopyToClipboard { get; set; }
 
-        [Option('d', "delay-seconds", Required = false, Default = 10, HelpText = "Delay in seconds after transcription before closing the application. Default is 10 seconds.")]
+        [Option('d', "delay-seconds", Required = false, Default = 0, HelpText = "Delay in seconds after transcription before closing the application. Default is 0 seconds.")]
         public int DelaySeconds { get; set; }
 
         [Option("lockfile", Required = false, Default = true, HelpText = "Use a lockfile to prevent multiple instances from running simultaneously. Default is true.")]
         public bool UseLockfile { get; set; }
+
+        [Option("save-transcript", Required = false, Default = true, HelpText = "Save the transcript to a text file. Default is true.")]
+        public bool SaveTranscript { get; set; } = true;
 
         [Option('v', "verbose", Required = false, Default = false, HelpText = "Enable verbose logging.")]
         public bool Verbose { get; set; }
