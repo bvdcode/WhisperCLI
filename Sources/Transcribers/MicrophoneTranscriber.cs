@@ -67,8 +67,14 @@ namespace WhisperCLI.Transcribers
             using var audioStream = new MemoryStream(File.ReadAllBytes(wavOutputPath));
             StringBuilder sb = new();
             using var processor = await processorTask.ConfigureAwait(false);
+            string prev = string.Empty;
             await foreach (var res in processor.ProcessAsync(audioStream, token))
             {
+                if (res.Text == prev)
+                {
+                    continue;
+                }
+                prev = res.Text;
                 _logger.Information("{lang}: {start}-{end} — {text}",
                     res.Language,
                     res.Start.ToString(@"hh\:mm\:ss"),
