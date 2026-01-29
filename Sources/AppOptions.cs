@@ -31,6 +31,9 @@ namespace WhisperCLI
         [Option("lockfile", Required = false, Default = true, HelpText = "Use a lockfile to prevent multiple instances from running simultaneously. Default is true.")]
         public bool UseLockfile { get; set; }
 
+        [Option("save-transcript", Required = false, Default = true, HelpText = "Save the transcript to a text file. Default is true.")]
+        public bool SaveTranscript { get; set; } = true;
+
         [Option('v', "verbose", Required = false, Default = false, HelpText = "Enable verbose logging.")]
         public bool Verbose { get; set; }
 
