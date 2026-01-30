@@ -78,13 +78,16 @@ namespace WhisperCLI
                         logger.Error(ex, "Failed to copy transcription result to clipboard.");
                     }
                 }
-                string lockFilePath = GetLockFileLocation();
-                File.Delete(lockFilePath);
                 await Task.Delay(options.DelaySeconds * 1000, cts.Token);
             }
             catch (TaskCanceledException)
             {
                 logger.Information("Operation canceled by user.");
+            }
+            finally
+            {
+                string lockFilePath = GetLockFileLocation();
+                File.Delete(lockFilePath);
             }
         }
 
