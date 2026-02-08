@@ -157,7 +157,7 @@ namespace WhisperCLI.Transcribers
             if (sb.Length > 0)
             {
                 string textFile = Path.ChangeExtension(wavOutputPath, ".txt");
-                await File.WriteAllTextAsync(textFile, sb.ToString(), token);
+                await File.WriteAllTextAsync(textFile, sb.ToString().Trim(), token);
                 _logger.Information("Transcription saved to {textFile}", textFile);
                 if (saveTranscript)
                 {
