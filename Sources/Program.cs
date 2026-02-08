@@ -188,6 +188,7 @@ namespace WhisperCLI
         private static Task<WhisperProcessor> CreateProcessorAsync(GgmlType model, FileInfo whisperModelInfo, Logger logger, string language)
         {
             logger.Information("Creating WhisperProcessor with language: {language}, model: {model}...", language, model);
+            const string prompt = "This is a transcription of live speech. Write normal text with periods, commas, and other punctuation marks.";
             try
             {
                 return Task.Run(() =>
@@ -197,6 +198,9 @@ namespace WhisperCLI
                     return whisperFactory
                         .CreateBuilder()
                         .WithLanguage(language)
+                        .WithPrompt(prompt)
+                        .WithTemperature(0.2f)
+                        .WithMaxSegmentLength(80)
                         .Build();
                 });
             }
