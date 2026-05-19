@@ -40,7 +40,7 @@ namespace WhisperCLI
                 return;
             }
             FileInfo whisperModelInfo = await GetWhisperModelPathAsync(options.Model, logger, cts.Token);
-            var processorTask = CreateProcessorAsync(options.Model, whisperModelInfo, logger, options.Language);
+            var processorTask = CreateProcessorAsync(options.Model, whisperModelInfo, logger, options.Language, cts.Token);
             FileInfo result;
             try
             {
@@ -169,20 +169,67 @@ namespace WhisperCLI
             var di = Directory.CreateDirectory(workingDirectory);
 
             string filePath = Path.Combine(di.FullName, modelName);
-            FileInfo fileInfo = new(filePath);
-            if (!fileInfo.Exists)
+            string partialPath = filePath + ".tmp";
+
+            // Clean up leftover partial download from a previous crashed/cancelled run.
+            if (File.Exists(partialPath))
             {
-                using var modelStream = await WhisperGgmlDownloader.Default.GetGgmlModelAsync(model, cancellationToken: token);
-                logger.Information("Downloading model: {_ggmlType}", model);
-                using var fileWriter = fileInfo.Create();
-                await modelStream.CopyToAsync(fileWriter, token);
-                logger.Information("Model downloaded: {filePath}", fileInfo.FullName);
+                logger.Warning("Removing leftover partial download: {partialPath}", partialPath);
+                File.Delete(partialPath);
             }
-            else
+
+            FileInfo fileInfo = new(filePath);
+            if (fileInfo.Exists)
             {
                 logger.Information("Model already exists: {filePath}", fileInfo.FullName);
+                return fileInfo;
             }
+
+            logger.Information("Downloading model: {model}", model);
+            using (var modelStream = await WhisperGgmlDownloader.Default.GetGgmlModelAsync(model, cancellationToken: token))
+            using (var fileWriter = File.Create(partialPath))
+            {
+                await CopyWithProgressAsync(modelStream, fileWriter, logger, token);
+            }
+            File.Move(partialPath, filePath);
+            fileInfo.Refresh();
+            logger.Information("Model downloaded: {filePath}", fileInfo.FullName);
             return fileInfo;
+        }
+
+        private static async Task CopyWithProgressAsync(Stream source, Stream destination, Logger logger, CancellationToken token)
+        {
+            long? totalSize = null;
+            try { totalSize = source.Length; }
+            catch (NotSupportedException) { }
+
+            byte[] buffer = new byte[81920];
+            long totalBytes = 0;
+            long lastLoggedBytes = 0;
+            int lastLoggedPct = -5;
+            int read;
+            while ((read = await source.ReadAsync(buffer, token).ConfigureAwait(false)) > 0)
+            {
+                await destination.WriteAsync(buffer.AsMemory(0, read), token).ConfigureAwait(false);
+                totalBytes += read;
+
+                if (totalSize.HasValue && totalSize.Value > 0)
+                {
+                    int pct = (int)(100 * totalBytes / totalSize.Value);
+                    if (pct >= lastLoggedPct + 5)
+                    {
+                        logger.Information("Downloading: {pct}% ({mb:0.0} / {totalMb:0.0} MB)",
+                            pct, totalBytes / 1048576.0, totalSize.Value / 1048576.0);
+                        lastLoggedPct = pct;
+                    }
+                }
+                else if (totalBytes - lastLoggedBytes >= 25L * 1024 * 1024)
+                {
+                    logger.Information("Downloading: {mb:0.0} MB", totalBytes / 1048576.0);
+                    lastLoggedBytes = totalBytes;
+                }
+            }
+            logger.Information("Download complete: {mb:0.0} MB", totalBytes / 1048576.0);
         }
 
         private static readonly Dictionary<string, string> LanguagePrompts = new(StringComparer.OrdinalIgnoreCase)
@@ -214,34 +261,38 @@ namespace WhisperCLI
             ["zh"] = "这是现场语音的转录。请用正常文本书写，使用句号、逗号和其他标点符号。",
         };
 
-        private static Task<WhisperProcessor> CreateProcessorAsync(GgmlType model, FileInfo whisperModelInfo, Logger logger, string language)
+        private static async Task<WhisperProcessor> CreateProcessorAsync(GgmlType model, FileInfo whisperModelInfo, Logger logger, string language, CancellationToken token)
         {
             logger.Information("Creating WhisperProcessor with language: {language}, model: {model}...", language, model);
             LanguagePrompts.TryGetValue(language, out string? prompt);
+
             try
             {
-                return Task.Run(() =>
-                {
-                    WhisperFactory whisperFactory = WhisperFactory.FromPath(whisperModelInfo.FullName);
-                    logger.Information("WhisperProcessor loaded in background: {model}", model);
-                    var builder = whisperFactory
-                        .CreateBuilder()
-                        .WithLanguage(language)
-                        .WithTemperature(0.2f)
-                        .WithMaxSegmentLength(80);
-                    if (!string.IsNullOrEmpty(prompt))
-                    {
-                        builder = builder.WithPrompt(prompt);
-                    }
-                    return builder.Build();
-                });
+                return await Task.Run(() => BuildProcessor(whisperModelInfo, language, prompt, logger, model), token).ConfigureAwait(false);
             }
-            catch (Exception ex)
+            catch (WhisperModelLoadException ex)
             {
-                logger.Error(ex, "Error occurred while creating WhisperProcessor");
-                Environment.Exit(-1);
-                throw;
+                logger.Warning(ex, "Model load failed — file may be corrupt. Removing and re-downloading: {filePath}", whisperModelInfo.FullName);
+                File.Delete(whisperModelInfo.FullName);
+                whisperModelInfo = await GetWhisperModelPathAsync(model, logger, token).ConfigureAwait(false);
+                return await Task.Run(() => BuildProcessor(whisperModelInfo, language, prompt, logger, model), token).ConfigureAwait(false);
             }
+        }
+
+        private static WhisperProcessor BuildProcessor(FileInfo whisperModelInfo, string language, string? prompt, Logger logger, GgmlType model)
+        {
+            WhisperFactory whisperFactory = WhisperFactory.FromPath(whisperModelInfo.FullName);
+            logger.Information("WhisperProcessor loaded in background: {model}", model);
+            var builder = whisperFactory
+                .CreateBuilder()
+                .WithLanguage(language)
+                .WithTemperature(0.2f)
+                .WithMaxSegmentLength(80);
+            if (!string.IsNullOrEmpty(prompt))
+            {
+                builder = builder.WithPrompt(prompt);
+            }
+            return builder.Build();
         }
     }
 }
