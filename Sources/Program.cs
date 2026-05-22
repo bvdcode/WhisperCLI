@@ -3,10 +3,12 @@ using System.Text;
 using Whisper.net;
 using Serilog.Core;
 using Serilog.Events;
+using Xabe.FFmpeg;
 using Whisper.net.Ggml;
 using System.Diagnostics;
 using Whisper.net.Logger;
 using WhisperCLI.Transcribers;
+using Xabe.FFmpeg.Downloader;
 
 namespace WhisperCLI
 {
@@ -14,21 +16,51 @@ namespace WhisperCLI
     {
         private static readonly HashSet<string> MediaExtensions = new(StringComparer.OrdinalIgnoreCase)
         {
+            ".3g2",
+            ".3gp",
             ".aac",
+            ".ac3",
+            ".aif",
             ".aiff",
+            ".amr",
+            ".ape",
+            ".asf",
+            ".au",
             ".avi",
+            ".caf",
+            ".dts",
+            ".dv",
+            ".f4v",
             ".flac",
+            ".flv",
+            ".m2ts",
             ".m4a",
+            ".m4b",
             ".m4v",
+            ".mka",
             ".mkv",
             ".mov",
+            ".mp2",
             ".mp3",
             ".mp4",
+            ".mpa",
+            ".mpeg",
+            ".mpg",
+            ".mts",
+            ".oga",
             ".ogg",
+            ".ogm",
+            ".ogv",
             ".opus",
+            ".ra",
+            ".rm",
+            ".rmvb",
+            ".ts",
+            ".vob",
             ".wav",
             ".webm",
-            ".wma"
+            ".wma",
+            ".wmv"
         };
 
         public static async Task Main(string[] args)
@@ -82,7 +114,7 @@ namespace WhisperCLI
                     return;
                 }
 
-                inputFiles = GetMediaFiles(folder, options.Recursive);
+                inputFiles = await GetMediaFilesAsync(folder, options.Recursive, logger, cts.Token);
                 if (inputFiles.Count == 0)
                 {
                     logger.Warning("No media files found in folder: {folderPath}", folder.FullName);
@@ -93,14 +125,29 @@ namespace WhisperCLI
             }
             else if (!string.IsNullOrWhiteSpace(options.InputFilePath))
             {
-                FileInfo inputFile = new(options.InputFilePath);
-                if (!inputFile.Exists)
+                DirectoryInfo inputDirectory = new(options.InputFilePath);
+                if (inputDirectory.Exists)
                 {
-                    logger.Error("Input file does not exist: {inputFilePath}", options.InputFilePath);
-                    return;
-                }
+                    inputFiles = await GetMediaFilesAsync(inputDirectory, options.Recursive, logger, cts.Token);
+                    if (inputFiles.Count == 0)
+                    {
+                        logger.Warning("No media files found in folder: {folderPath}", inputDirectory.FullName);
+                        return;
+                    }
 
-                inputFiles.Add(inputFile);
+                    logger.Information("Found {count} media file(s) in {folderPath}.", inputFiles.Count, inputDirectory.FullName);
+                }
+                else
+                {
+                    FileInfo inputFile = new(options.InputFilePath);
+                    if (!inputFile.Exists)
+                    {
+                        logger.Error("Input file or folder does not exist: {inputFilePath}", options.InputFilePath);
+                        return;
+                    }
+
+                    inputFiles.Add(inputFile);
+                }
             }
 
             FileInfo whisperModelInfo = await GetWhisperModelPathAsync(options.Model, logger, cts.Token);
@@ -112,7 +159,7 @@ namespace WhisperCLI
                 {
                     logger.Information("Press {stopKey} to stop recording.", options.StopKey);
                     FileInfo result = await new MicrophoneTranscriber(logger, options.MicrophoneIndex)
-                        .TranscribeAudioAsync(processorTask, options.SaveTranscript, options.Format, () => CheckCancellation(options.StopKey), cts.Token);
+                        .TranscribeAudioAsync(processorTask, options.SaveTranscript, OutputFormat.Txt, () => CheckCancellation(options.StopKey), cts.Token);
                     results.Add(result);
                 }
                 else
@@ -159,13 +206,76 @@ namespace WhisperCLI
             }
         }
 
-        private static List<FileInfo> GetMediaFiles(DirectoryInfo folder, bool recursive)
+        private static async Task<List<FileInfo>> GetMediaFilesAsync(DirectoryInfo folder, bool recursive, Logger logger, CancellationToken token)
         {
+            await CheckFfmpegAsync(logger, token);
             SearchOption searchOption = recursive ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly;
-            return [.. folder
-                .EnumerateFiles("*", searchOption)
-                .Where(file => MediaExtensions.Contains(file.Extension))
-                .OrderBy(file => file.FullName, StringComparer.OrdinalIgnoreCase)];
+            List<FileInfo> mediaFiles = [];
+            foreach (FileInfo file in folder.EnumerateFiles("*", searchOption).OrderBy(file => file.FullName, StringComparer.OrdinalIgnoreCase))
+            {
+                if (!MediaExtensions.Contains(file.Extension))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    var mediaInfo = await FFmpeg.GetMediaInfo(file.FullName, token);
+                    if (mediaInfo.AudioStreams.Any() || mediaInfo.VideoStreams.Any())
+                    {
+                        mediaFiles.Add(file);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    logger.Debug(ex, "Skipping non-media file: {filePath}", file.FullName);
+                }
+            }
+
+            return mediaFiles;
+        }
+
+        private static async Task CheckFfmpegAsync(Logger logger, CancellationToken token)
+        {
+            string tempPath = Path.GetTempPath();
+            string workingDirectory = Path.Combine(tempPath, "WhisperCLI", "FFMpeg");
+            Directory.CreateDirectory(workingDirectory);
+            FFmpeg.SetExecutablesPath(workingDirectory);
+            logger.Information("Checking FFmpeg...");
+            if (Directory.GetFiles(workingDirectory).Length == 0)
+            {
+                logger.Information("FFmpeg not found - downloading...");
+                var task1 = FFmpegDownloader.GetLatestVersion(FFmpegVersion.Official, FFmpeg.ExecutablesPath, new FFMpegDownloadingProgress(logger));
+                var task2 = Task.Delay(600_000, token);
+                await Task.WhenAny(task1, task2);
+                logger.Information("FFmpeg downloaded");
+                if (Environment.OSVersion.Platform == PlatformID.Unix)
+                {
+                    Exec("chmod +x " + Path.Combine(workingDirectory, "ffmpeg"));
+                    Exec("chmod +x " + Path.Combine(workingDirectory, "ffprobe"));
+                }
+            }
+        }
+
+        private static void Exec(string cmd)
+        {
+            var escapedArgs = cmd.Replace("\"", "\\\"");
+
+            using var process = new Process
+            {
+                StartInfo = new ProcessStartInfo
+                {
+                    RedirectStandardOutput = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    WindowStyle = ProcessWindowStyle.Hidden,
+                    FileName = "/bin/bash",
+                    Arguments = $"-c \"{escapedArgs}\""
+                }
+            };
+
+            process.Start();
+            process.WaitForExit();
         }
 
         private static async Task<List<FileInfo>> TranscribeFilesAsync(

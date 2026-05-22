@@ -5,7 +5,7 @@ WhisperCLI is a command-line tool for transcribing audio from files or microphon
 ## Features
 
 - Transcribe audio and video files to subtitles or text
-- Generate transcripts for all media files in a folder
+- Generate subtitles for all media files in a folder
 - Record and transcribe audio directly from microphone
 - Support for various audio and video formats (mp3, mp4, mkv, avi, etc.)
 - Automatic downloading of Whisper models
@@ -50,10 +50,10 @@ WhisperCLI [options] [inputFilePath]
 - `-m, --model`: Model to use for transcription (default: LargeV3Turbo)
 - `-i, --microphone-index`: Index of microphone to use for recording (default: 0)
 - `-s, --stop-key`: Key to stop recording when using microphone input (default: Spacebar)
-- `-f, --format`: Output format: `srt`, `vtt`, or `txt` (default: `srt`)
+- `-f, --format`: Output format for file/folder transcription: `srt`, `vtt`, or `txt` (default: `srt`; microphone always writes `txt`)
 - `--folder`: Process all media files in the specified folder
 - `-r, --recursive`: Include subfolders when using `--folder`
-- `inputFilePath`: Path to the audio or video file to transcribe (if omitted without `--folder`, uses microphone input)
+- `inputFilePath`: Path to the audio/video file or folder to transcribe (if omitted without `--folder`, uses microphone input)
 
 ### Examples
 
@@ -110,7 +110,7 @@ WhisperCLI -s Enter
 
 ### For Folder Input
 
-1. Pass `--folder <path>` to process every supported media file in that folder
+1. Pass `--folder <path>` to process every FFmpeg-detectable media file in that folder
 2. Add `-r` or `--recursive` to include subfolders
 3. Each output file is saved next to its source media file
 
@@ -120,7 +120,7 @@ WhisperCLI -s Enter
 2. Audio is recorded from the selected microphone until the stop key is pressed
 3. The recording is saved as a WAV file in your temp directory
 4. The audio is processed using the Whisper model
-5. The transcription is saved alongside the recording and opened automatically
+5. The transcription is saved as plain text alongside the recording
 
 ## Dependencies
 
