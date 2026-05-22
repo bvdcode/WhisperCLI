@@ -19,7 +19,7 @@ namespace WhisperCLI
         [Option('s', "stop-key", Required = false, Default = ConsoleKey.Spacebar, HelpText = "Key to stop recording when using microphone input. Default is 'Space'.")]
         public ConsoleKey StopKey { get; set; }
 
-        [Option('o', "open-results", Required = false, Default = false, HelpText = "Open the results text file after transcription.")]
+        [Option('o', "open-results", Required = false, Default = false, HelpText = "Open the result file after transcription.")]
         public bool OpenTextFile { get; set; }
 
         [Option('c', "copy-to-clipboard", Required = false, Default = true, HelpText = "Copy the transcription result to the clipboard.")]
@@ -31,7 +31,7 @@ namespace WhisperCLI
         [Option("lockfile", Required = false, Default = false, HelpText = "Use a lockfile to prevent multiple instances from running simultaneously. Default is true.")]
         public bool UseLockfile { get; set; }
 
-        [Option("save-transcript", Required = false, Default = true, HelpText = "Save the transcript to a text file. Default is true.")]
+        [Option("save-transcript", Required = false, Default = true, HelpText = "Copy microphone transcripts to the local app data transcripts folder. Default is true.")]
         public bool SaveTranscript { get; set; } = true;
 
         [Option('v', "verbose", Required = false, Default = false, HelpText = "Enable verbose logging.")]
@@ -39,5 +39,8 @@ namespace WhisperCLI
 
         [Option('l', "language", Required = false, Default = "auto", HelpText = "Language of the audio input. Default is 'auto'. Specify a language code (e.g., 'en' for English) to force a specific language.")]
         public string Language { get; set; } = "auto";
+
+        [Option('f', "format", Required = false, Default = OutputFormat.Srt, HelpText = "Output format: srt, vtt, or txt. Default is srt.")]
+        public OutputFormat Format { get; set; } = OutputFormat.Srt;
     }
 }

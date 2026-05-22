@@ -94,6 +94,7 @@ namespace WhisperCLI.Transcribers
         public async Task<FileInfo> TranscribeAudioAsync(
             Task<WhisperProcessor> processorTask,
             bool saveTranscript,
+            OutputFormat format,
             Func<bool> stopRecording,
             CancellationToken token)
         {
@@ -132,7 +133,7 @@ namespace WhisperCLI.Transcribers
 
             _logger.Information("Recording stopped. Transcribing...");
             using var audioStream = new MemoryStream(File.ReadAllBytes(wavOutputPath));
-            StringBuilder sb = new();
+            List<TranscriptSegment> segments = [];
             using var processor = await processorTask.ConfigureAwait(false);
             string prev = string.Empty;
             await foreach (var res in processor.ProcessAsync(audioStream, token))
@@ -147,25 +148,25 @@ namespace WhisperCLI.Transcribers
                     res.Start.ToString(@"hh\:mm\:ss"),
                     res.End.ToString(@"hh\:mm\:ss"),
                     res.Text);
-                TranscriptFormatter.AppendSegment(sb, res.Text);
+                segments.Add(new TranscriptSegment(res.Start, res.End, res.Text));
                 if (token.IsCancellationRequested)
                 {
                     break;
                 }
             }
             _logger.Information("Transcription completed - wave file saved to {wavOutputPath}", wavOutputPath);
-            if (sb.Length > 0)
+            if (segments.Count > 0)
             {
-                string textFile = Path.ChangeExtension(wavOutputPath, ".txt");
-                await File.WriteAllTextAsync(textFile, TranscriptFormatter.Finalize(sb.ToString()), token);
-                _logger.Information("Transcription saved to {textFile}", textFile);
+                string outputFile = Path.ChangeExtension(wavOutputPath, TranscriptFormatter.GetFileExtension(format));
+                await File.WriteAllTextAsync(outputFile, TranscriptFormatter.Format(segments, format), token);
+                _logger.Information("Transcription saved to {outputFile}", outputFile);
                 if (saveTranscript)
                 {
                     string path = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
                     string saveDirectory = Path.Combine(path, "WhisperCLI", "Transcripts");
                     Directory.CreateDirectory(saveDirectory);
-                    string savedFilePath = Path.Combine(saveDirectory, Path.GetFileName(textFile));
-                    File.Copy(textFile, savedFilePath, true);
+                    string savedFilePath = Path.Combine(saveDirectory, Path.GetFileName(outputFile));
+                    File.Copy(outputFile, savedFilePath, true);
                     
                     try
                     {
@@ -180,7 +181,7 @@ namespace WhisperCLI.Transcribers
                         _logger.Warning(ex, "Failed to transcode recording to MP3");
                     }
                 }
-                return new(textFile);
+                return new(outputFile);
             }
             else
             {

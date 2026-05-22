@@ -77,11 +77,11 @@ namespace WhisperCLI.Transcribers
             return ms;
         }
 
-        public async Task<FileInfo> TranscribeAudioAsync(FileInfo inputFile, Task<WhisperProcessor> processorTask, CancellationToken token)
+        public async Task<FileInfo> TranscribeAudioAsync(FileInfo inputFile, Task<WhisperProcessor> processorTask, OutputFormat format, CancellationToken token)
         {
             await CheckFfmpegAsync(token);
             MemoryStream waves = await ConvertToWaveStreamAsync(inputFile);
-            StringBuilder sb = new();
+            List<TranscriptSegment> segments = [];
             Stopwatch sw = Stopwatch.StartNew();
             string prev = string.Empty;
             _logger.Information("Starting transcription for {inputFile}", inputFile.Name);
@@ -92,7 +92,7 @@ namespace WhisperCLI.Transcribers
                 {
                     continue;
                 }
-                TranscriptFormatter.AppendSegment(sb, result.Text);
+                segments.Add(new TranscriptSegment(result.Start, result.End, result.Text));
                 prev = result.Text;
                 _logger.Information("{lang}: {start}->{end}: {text}", result.Language,
                     result.Start.ToString(@"hh\:mm\:ss"), result.End.ToString(@"hh\:mm\:ss"), result.Text);
@@ -103,10 +103,10 @@ namespace WhisperCLI.Transcribers
                 }
             }
             _logger.Information("Elapsed: {el}", sw.Elapsed.ToString(@"hh\:mm\:ss"));
-            string textFilePath = Path.ChangeExtension(inputFile.FullName, ".txt");
-            File.WriteAllText(textFilePath, TranscriptFormatter.Finalize(sb.ToString()), Encoding.UTF8);
-            _logger.Information("Transcription complete. Output saved to: {textFilePath}", textFilePath);
-            return new FileInfo(textFilePath);
+            string outputFilePath = Path.ChangeExtension(inputFile.FullName, TranscriptFormatter.GetFileExtension(format));
+            File.WriteAllText(outputFilePath, TranscriptFormatter.Format(segments, format), Encoding.UTF8);
+            _logger.Information("Transcription complete. Output saved to: {outputFilePath}", outputFilePath);
+            return new FileInfo(outputFilePath);
         }
     }
 }

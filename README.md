@@ -49,6 +49,7 @@ WhisperCLI [options] [inputFilePath]
 - `-m, --model`: Model to use for transcription (default: LargeV3Turbo)
 - `-i, --microphone-index`: Index of microphone to use for recording (default: 0)
 - `-s, --stop-key`: Key to stop recording when using microphone input (default: Spacebar)
+- `-f, --format`: Output format: `srt`, `vtt`, or `txt` (default: `srt`)
 - `inputFilePath`: Path to the audio or video file to transcribe (if omitted, uses microphone input)
 
 ### Examples
@@ -56,6 +57,9 @@ WhisperCLI [options] [inputFilePath]
 ```
 # Transcribe an audio file
 WhisperCLI input.mp3
+
+# Transcribe an audio file as plain text
+WhisperCLI -f txt input.mp3
 
 # Transcribe a video file with a specific model
 WhisperCLI -m Small video.mp4
@@ -93,7 +97,7 @@ WhisperCLI -s Enter
 2. FFmpeg is downloaded automatically if not already present
 3. The input audio/video file is converted to the proper WAV format using FFmpeg
 4. The audio is processed using the Whisper model
-5. The transcription is saved as a text file in the same location as the input file
+5. The transcription is saved in the selected output format in the same location as the input file
 
 ### For Microphone Input
 

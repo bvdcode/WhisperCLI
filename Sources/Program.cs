@@ -14,7 +14,13 @@ namespace WhisperCLI
     {
         public static async Task Main(string[] args)
         {
-            AppOptions options = CommandLine.Parser.Default.ParseArguments<AppOptions>(args).Value;
+            var parserResult = CommandLine.Parser.Default.ParseArguments<AppOptions>(args);
+            if (parserResult is not CommandLine.Parsed<AppOptions> parsedOptions)
+            {
+                return;
+            }
+
+            AppOptions options = parsedOptions.Value;
             ArgumentOutOfRangeException.ThrowIfNegative(options.DelaySeconds, "Delay seconds must be non-negative.");
             Console.OutputEncoding = Encoding.UTF8;
             CancellationTokenSource cts = new();
@@ -48,7 +54,7 @@ namespace WhisperCLI
                 {
                     logger.Information("Press {stopKey} to stop recording.", options.StopKey);
                     result = await new MicrophoneTranscriber(logger, options.MicrophoneIndex)
-                        .TranscribeAudioAsync(processorTask, options.SaveTranscript, () => CheckCancellation(options.StopKey), cts.Token);
+                        .TranscribeAudioAsync(processorTask, options.SaveTranscript, options.Format, () => CheckCancellation(options.StopKey), cts.Token);
                 }
                 else
                 {
@@ -59,7 +65,7 @@ namespace WhisperCLI
                         return;
                     }
                     result = await new FileTranscriber(logger)
-                        .TranscribeAudioAsync(inputFile, processorTask, cts.Token);
+                        .TranscribeAudioAsync(inputFile, processorTask, options.Format, cts.Token);
                 }
                 if (options.OpenTextFile)
                 {
