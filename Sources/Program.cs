@@ -234,6 +234,7 @@ namespace WhisperCLI
 
         private static readonly Dictionary<string, string> LanguagePrompts = new(StringComparer.OrdinalIgnoreCase)
         {
+            ["auto"] = "This is a speech transcript. Write natural text with sentence punctuation. Это транскрипция речи. Пишите обычным текстом с точками, запятыми и другими знаками препинания.",
             ["ar"] = "هذا نص لخطاب مباشر. اكتب نصاً عادياً مع النقاط والفواصل وعلامات الترقيم الأخرى.",
             ["bg"] = "Това е транскрипция на жива реч. Пишете нормален текст с точки, запетаи и други препинателни знаци.",
             ["cs"] = "Toto je přepis živé řeči. Pište běžným textem s tečkami, čárkami a dalšími interpunkčními znaménky.",
@@ -286,8 +287,9 @@ namespace WhisperCLI
             var builder = whisperFactory
                 .CreateBuilder()
                 .WithLanguage(language)
-                .WithTemperature(0.2f)
-                .WithMaxSegmentLength(80);
+                .WithTemperature(0f)
+                .WithTemperatureInc(0f)
+                .WithMaxSegmentLength(160);
             if (!string.IsNullOrEmpty(prompt))
             {
                 builder = builder.WithPrompt(prompt);

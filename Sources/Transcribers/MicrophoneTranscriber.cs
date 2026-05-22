@@ -147,7 +147,7 @@ namespace WhisperCLI.Transcribers
                     res.Start.ToString(@"hh\:mm\:ss"),
                     res.End.ToString(@"hh\:mm\:ss"),
                     res.Text);
-                sb.Append(res.Text);
+                TranscriptFormatter.AppendSegment(sb, res.Text);
                 if (token.IsCancellationRequested)
                 {
                     break;
@@ -157,7 +157,7 @@ namespace WhisperCLI.Transcribers
             if (sb.Length > 0)
             {
                 string textFile = Path.ChangeExtension(wavOutputPath, ".txt");
-                await File.WriteAllTextAsync(textFile, sb.ToString().Trim(), token);
+                await File.WriteAllTextAsync(textFile, TranscriptFormatter.Finalize(sb.ToString()), token);
                 _logger.Information("Transcription saved to {textFile}", textFile);
                 if (saveTranscript)
                 {

@@ -92,7 +92,7 @@ namespace WhisperCLI.Transcribers
                 {
                     continue;
                 }
-                sb.Append(result.Text);
+                TranscriptFormatter.AppendSegment(sb, result.Text);
                 prev = result.Text;
                 _logger.Information("{lang}: {start}->{end}: {text}", result.Language,
                     result.Start.ToString(@"hh\:mm\:ss"), result.End.ToString(@"hh\:mm\:ss"), result.Text);
@@ -104,7 +104,7 @@ namespace WhisperCLI.Transcribers
             }
             _logger.Information("Elapsed: {el}", sw.Elapsed.ToString(@"hh\:mm\:ss"));
             string textFilePath = Path.ChangeExtension(inputFile.FullName, ".txt");
-            File.WriteAllText(textFilePath, sb.ToString(), Encoding.UTF8);
+            File.WriteAllText(textFilePath, TranscriptFormatter.Finalize(sb.ToString()), Encoding.UTF8);
             _logger.Information("Transcription complete. Output saved to: {textFilePath}", textFilePath);
             return new FileInfo(textFilePath);
         }
