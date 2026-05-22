@@ -12,6 +12,25 @@ namespace WhisperCLI
 {
     public class Program
     {
+        private static readonly HashSet<string> MediaExtensions = new(StringComparer.OrdinalIgnoreCase)
+        {
+            ".aac",
+            ".aiff",
+            ".avi",
+            ".flac",
+            ".m4a",
+            ".m4v",
+            ".mkv",
+            ".mov",
+            ".mp3",
+            ".mp4",
+            ".ogg",
+            ".opus",
+            ".wav",
+            ".webm",
+            ".wma"
+        };
+
         public static async Task Main(string[] args)
         {
             var parserResult = CommandLine.Parser.Default.ParseArguments<AppOptions>(args);
@@ -45,37 +64,75 @@ namespace WhisperCLI
                 await Task.Delay(options.DelaySeconds * 1000, cts.Token);
                 return;
             }
+
+            List<FileInfo> inputFiles = [];
+            bool folderMode = !string.IsNullOrWhiteSpace(options.FolderPath);
+            if (folderMode)
+            {
+                if (!string.IsNullOrWhiteSpace(options.InputFilePath))
+                {
+                    logger.Error("Specify either an input file or --folder, not both.");
+                    return;
+                }
+
+                DirectoryInfo folder = new(options.FolderPath);
+                if (!folder.Exists)
+                {
+                    logger.Error("Input folder does not exist: {folderPath}", options.FolderPath);
+                    return;
+                }
+
+                inputFiles = GetMediaFiles(folder, options.Recursive);
+                if (inputFiles.Count == 0)
+                {
+                    logger.Warning("No media files found in folder: {folderPath}", folder.FullName);
+                    return;
+                }
+
+                logger.Information("Found {count} media file(s) in {folderPath}.", inputFiles.Count, folder.FullName);
+            }
+            else if (!string.IsNullOrWhiteSpace(options.InputFilePath))
+            {
+                FileInfo inputFile = new(options.InputFilePath);
+                if (!inputFile.Exists)
+                {
+                    logger.Error("Input file does not exist: {inputFilePath}", options.InputFilePath);
+                    return;
+                }
+
+                inputFiles.Add(inputFile);
+            }
+
             FileInfo whisperModelInfo = await GetWhisperModelPathAsync(options.Model, logger, cts.Token);
             var processorTask = CreateProcessorAsync(options.Model, whisperModelInfo, logger, options.Language, cts.Token);
-            FileInfo result;
+            List<FileInfo> results = [];
             try
             {
-                if (string.IsNullOrWhiteSpace(options.InputFilePath))
+                if (inputFiles.Count == 0)
                 {
                     logger.Information("Press {stopKey} to stop recording.", options.StopKey);
-                    result = await new MicrophoneTranscriber(logger, options.MicrophoneIndex)
+                    FileInfo result = await new MicrophoneTranscriber(logger, options.MicrophoneIndex)
                         .TranscribeAudioAsync(processorTask, options.SaveTranscript, options.Format, () => CheckCancellation(options.StopKey), cts.Token);
+                    results.Add(result);
                 }
                 else
                 {
-                    FileInfo inputFile = new(options.InputFilePath);
-                    if (!inputFile.Exists)
-                    {
-                        logger.Error("Input file does not exist: {inputFilePath}", options.InputFilePath);
-                        return;
-                    }
-                    result = await new FileTranscriber(logger)
-                        .TranscribeAudioAsync(inputFile, processorTask, options.Format, cts.Token);
+                    results.AddRange(await TranscribeFilesAsync(inputFiles, processorTask, options.Format, logger, cts.Token));
                 }
-                if (options.OpenTextFile)
+                if (results.Count == 1 && options.OpenTextFile)
                 {
-                    OpenFile(result);
+                    OpenFile(results[0]);
                 }
-                if (options.CopyToClipboard)
+                else if (results.Count > 1 && options.OpenTextFile)
+                {
+                    logger.Information("Skipping --open-results because multiple output files were generated.");
+                }
+
+                if (results.Count == 1 && options.CopyToClipboard)
                 {
                     try
                     {
-                        string text = File.ReadAllText(result.FullName, Encoding.UTF8);
+                        string text = File.ReadAllText(results[0].FullName, Encoding.UTF8);
                         TextCopy.ClipboardService.SetText(text);
                         logger.Information("Transcription result copied to clipboard.");
                     }
@@ -84,6 +141,11 @@ namespace WhisperCLI
                         logger.Error(ex, "Failed to copy transcription result to clipboard.");
                     }
                 }
+                else if (results.Count > 1 && options.CopyToClipboard)
+                {
+                    logger.Information("Skipping clipboard copy because multiple output files were generated.");
+                }
+
                 await Task.Delay(options.DelaySeconds * 1000, cts.Token);
             }
             catch (TaskCanceledException)
@@ -95,6 +157,37 @@ namespace WhisperCLI
                 string lockFilePath = GetLockFileLocation();
                 File.Delete(lockFilePath);
             }
+        }
+
+        private static List<FileInfo> GetMediaFiles(DirectoryInfo folder, bool recursive)
+        {
+            SearchOption searchOption = recursive ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly;
+            return folder
+                .EnumerateFiles("*", searchOption)
+                .Where(file => MediaExtensions.Contains(file.Extension))
+                .OrderBy(file => file.FullName, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        private static async Task<List<FileInfo>> TranscribeFilesAsync(
+            IReadOnlyList<FileInfo> inputFiles,
+            Task<WhisperProcessor> processorTask,
+            OutputFormat format,
+            Logger logger,
+            CancellationToken token)
+        {
+            List<FileInfo> results = [];
+            using var processor = await processorTask.ConfigureAwait(false);
+            FileTranscriber transcriber = new(logger);
+            for (int i = 0; i < inputFiles.Count; i++)
+            {
+                FileInfo inputFile = inputFiles[i];
+                logger.Information("Processing file {current}/{total}: {inputFile}", i + 1, inputFiles.Count, inputFile.FullName);
+                FileInfo result = await transcriber.TranscribeAudioAsync(inputFile, processor, format, token).ConfigureAwait(false);
+                results.Add(result);
+            }
+
+            return results;
         }
 
         private static string GetLockFileLocation()

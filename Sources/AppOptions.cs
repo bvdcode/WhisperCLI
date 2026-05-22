@@ -10,7 +10,7 @@ namespace WhisperCLI
             "'tiny', 'base', 'small', 'medium', 'large-v1', 'large-v2', 'large-v3-turbo'.")]
         public GgmlType Model { get; set; }
 
-        [Value(1, Required = false, HelpText = "Path to the input audio file to transcribe.")]
+        [Value(1, Required = false, HelpText = "Path to the input media file to transcribe. If omitted without --folder, uses microphone input.")]
         public string InputFilePath { get; set; } = string.Empty;
 
         [Option('i', "microphone-index", Required = false, Default = 0, HelpText = "Index of the microphone to use for recording. Default is 0 (first microphone).")]
@@ -42,5 +42,11 @@ namespace WhisperCLI
 
         [Option('f', "format", Required = false, Default = OutputFormat.Srt, HelpText = "Output format: srt, vtt, or txt. Default is srt.")]
         public OutputFormat Format { get; set; } = OutputFormat.Srt;
+
+        [Option("folder", Required = false, HelpText = "Process all media files in the specified folder. Use '.' for the current folder.")]
+        public string FolderPath { get; set; } = string.Empty;
+
+        [Option('r', "recursive", Required = false, Default = false, HelpText = "When using --folder, include subfolders.")]
+        public bool Recursive { get; set; }
     }
 }

@@ -4,7 +4,8 @@ WhisperCLI is a command-line tool for transcribing audio from files or microphon
 
 ## Features
 
-- Transcribe audio and video files to text
+- Transcribe audio and video files to subtitles or text
+- Generate transcripts for all media files in a folder
 - Record and transcribe audio directly from microphone
 - Support for various audio and video formats (mp3, mp4, mkv, avi, etc.)
 - Automatic downloading of Whisper models
@@ -50,7 +51,9 @@ WhisperCLI [options] [inputFilePath]
 - `-i, --microphone-index`: Index of microphone to use for recording (default: 0)
 - `-s, --stop-key`: Key to stop recording when using microphone input (default: Spacebar)
 - `-f, --format`: Output format: `srt`, `vtt`, or `txt` (default: `srt`)
-- `inputFilePath`: Path to the audio or video file to transcribe (if omitted, uses microphone input)
+- `--folder`: Process all media files in the specified folder
+- `-r, --recursive`: Include subfolders when using `--folder`
+- `inputFilePath`: Path to the audio or video file to transcribe (if omitted without `--folder`, uses microphone input)
 
 ### Examples
 
@@ -60,6 +63,12 @@ WhisperCLI input.mp3
 
 # Transcribe an audio file as plain text
 WhisperCLI -f txt input.mp3
+
+# Generate subtitles for all media files in the current folder
+WhisperCLI --folder .
+
+# Generate subtitles for all media files in a folder and its subfolders
+WhisperCLI --folder "D:\Media" -r
 
 # Transcribe a video file with a specific model
 WhisperCLI -m Small video.mp4
@@ -98,6 +107,12 @@ WhisperCLI -s Enter
 3. The input audio/video file is converted to the proper WAV format using FFmpeg
 4. The audio is processed using the Whisper model
 5. The transcription is saved in the selected output format in the same location as the input file
+
+### For Folder Input
+
+1. Pass `--folder <path>` to process every supported media file in that folder
+2. Add `-r` or `--recursive` to include subfolders
+3. Each output file is saved next to its source media file
 
 ### For Microphone Input
 

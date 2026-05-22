@@ -57,10 +57,11 @@ namespace WhisperCLI.Transcribers
 
         private async Task<MemoryStream> ConvertToWaveStreamAsync(FileInfo inputFile)
         {
-            string targetFile = Path.ChangeExtension(inputFile.FullName, ".wav");
-            bool isVideo = inputFile.Extension.Equals(".mp4", StringComparison.OrdinalIgnoreCase) ||
-                           inputFile.Extension.Equals(".mkv", StringComparison.OrdinalIgnoreCase) ||
-                           inputFile.Extension.Equals(".avi", StringComparison.OrdinalIgnoreCase);
+            string tempPath = Path.GetTempPath();
+            string workingDirectory = Path.Combine(tempPath, "WhisperCLI", "Conversions");
+            Directory.CreateDirectory(workingDirectory);
+            string targetFile = Path.Combine(workingDirectory, $"{Path.GetFileNameWithoutExtension(inputFile.Name)}-{Guid.NewGuid():N}.wav");
+            bool isVideo = IsVideoFile(inputFile);
             var conversion = isVideo
                 ? await FFmpeg.Conversions.FromSnippet.ExtractAudio(inputFile.FullName, targetFile)
                 : await FFmpeg.Conversions.FromSnippet.Convert(inputFile.FullName, targetFile);
@@ -70,22 +71,35 @@ namespace WhisperCLI.Transcribers
             {
                 _logger.Information("Converting media to wave: {argsPercent}%", args.Percent);
             };
-            await conversion.Start();
-            byte[] bytes = File.ReadAllBytes(targetFile);
-            MemoryStream ms = new(bytes);
-            File.Delete(targetFile);
-            return ms;
+            try
+            {
+                await conversion.Start();
+                byte[] bytes = await File.ReadAllBytesAsync(targetFile);
+                return new MemoryStream(bytes);
+            }
+            finally
+            {
+                if (File.Exists(targetFile))
+                {
+                    File.Delete(targetFile);
+                }
+            }
         }
 
         public async Task<FileInfo> TranscribeAudioAsync(FileInfo inputFile, Task<WhisperProcessor> processorTask, OutputFormat format, CancellationToken token)
         {
+            using var processor = await processorTask.ConfigureAwait(false);
+            return await TranscribeAudioAsync(inputFile, processor, format, token);
+        }
+
+        public async Task<FileInfo> TranscribeAudioAsync(FileInfo inputFile, WhisperProcessor processor, OutputFormat format, CancellationToken token)
+        {
             await CheckFfmpegAsync(token);
-            MemoryStream waves = await ConvertToWaveStreamAsync(inputFile);
+            await using MemoryStream waves = await ConvertToWaveStreamAsync(inputFile);
             List<TranscriptSegment> segments = [];
             Stopwatch sw = Stopwatch.StartNew();
             string prev = string.Empty;
             _logger.Information("Starting transcription for {inputFile}", inputFile.Name);
-            using var processor = await processorTask.ConfigureAwait(false);
             await foreach (var result in processor.ProcessAsync(waves, token))
             {
                 if (result.Text == prev)
@@ -107,6 +121,16 @@ namespace WhisperCLI.Transcribers
             File.WriteAllText(outputFilePath, TranscriptFormatter.Format(segments, format), Encoding.UTF8);
             _logger.Information("Transcription complete. Output saved to: {outputFilePath}", outputFilePath);
             return new FileInfo(outputFilePath);
+        }
+
+        private static bool IsVideoFile(FileInfo inputFile)
+        {
+            return inputFile.Extension.Equals(".mp4", StringComparison.OrdinalIgnoreCase) ||
+                   inputFile.Extension.Equals(".mkv", StringComparison.OrdinalIgnoreCase) ||
+                   inputFile.Extension.Equals(".avi", StringComparison.OrdinalIgnoreCase) ||
+                   inputFile.Extension.Equals(".mov", StringComparison.OrdinalIgnoreCase) ||
+                   inputFile.Extension.Equals(".m4v", StringComparison.OrdinalIgnoreCase) ||
+                   inputFile.Extension.Equals(".webm", StringComparison.OrdinalIgnoreCase);
         }
     }
 }
