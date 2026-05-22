@@ -162,11 +162,10 @@ namespace WhisperCLI
         private static List<FileInfo> GetMediaFiles(DirectoryInfo folder, bool recursive)
         {
             SearchOption searchOption = recursive ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly;
-            return folder
+            return [.. folder
                 .EnumerateFiles("*", searchOption)
                 .Where(file => MediaExtensions.Contains(file.Extension))
-                .OrderBy(file => file.FullName, StringComparer.OrdinalIgnoreCase)
-                .ToList();
+                .OrderBy(file => file.FullName, StringComparer.OrdinalIgnoreCase)];
         }
 
         private static async Task<List<FileInfo>> TranscribeFilesAsync(
