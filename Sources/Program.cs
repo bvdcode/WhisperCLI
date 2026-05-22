@@ -93,7 +93,7 @@ namespace WhisperCLI
             });
             if (options.UseLockfile && CheckLockfile(logger))
             {
-                await Task.Delay(options.DelaySeconds * 1000, cts.Token);
+                await DelayBeforeExitAsync(options, cts.Token);
                 return;
             }
 
@@ -104,6 +104,7 @@ namespace WhisperCLI
                 if (!string.IsNullOrWhiteSpace(options.InputFilePath))
                 {
                     logger.Error("Specify either an input file or --folder, not both.");
+                    await DelayBeforeExitAsync(options, cts.Token);
                     return;
                 }
 
@@ -111,13 +112,16 @@ namespace WhisperCLI
                 if (!folder.Exists)
                 {
                     logger.Error("Input folder does not exist: {folderPath}", options.FolderPath);
+                    await DelayBeforeExitAsync(options, cts.Token);
                     return;
                 }
 
+                logger.Information("Scanning folder: {folderPath}", folder.FullName);
                 inputFiles = await GetMediaFilesAsync(folder, options.Recursive, logger, cts.Token);
                 if (inputFiles.Count == 0)
                 {
                     logger.Warning("No media files found in folder: {folderPath}", folder.FullName);
+                    await DelayBeforeExitAsync(options, cts.Token);
                     return;
                 }
 
@@ -128,10 +132,12 @@ namespace WhisperCLI
                 DirectoryInfo inputDirectory = new(options.InputFilePath);
                 if (inputDirectory.Exists)
                 {
+                    logger.Information("Scanning folder: {folderPath}", inputDirectory.FullName);
                     inputFiles = await GetMediaFilesAsync(inputDirectory, options.Recursive, logger, cts.Token);
                     if (inputFiles.Count == 0)
                     {
                         logger.Warning("No media files found in folder: {folderPath}", inputDirectory.FullName);
+                        await DelayBeforeExitAsync(options, cts.Token);
                         return;
                     }
 
@@ -143,6 +149,7 @@ namespace WhisperCLI
                     if (!inputFile.Exists)
                     {
                         logger.Error("Input file or folder does not exist: {inputFilePath}", options.InputFilePath);
+                        await DelayBeforeExitAsync(options, cts.Token);
                         return;
                     }
 
@@ -193,7 +200,7 @@ namespace WhisperCLI
                     logger.Information("Skipping clipboard copy because multiple output files were generated.");
                 }
 
-                await Task.Delay(options.DelaySeconds * 1000, cts.Token);
+                await DelayBeforeExitAsync(options, cts.Token);
             }
             catch (TaskCanceledException)
             {
@@ -203,6 +210,14 @@ namespace WhisperCLI
             {
                 string lockFilePath = GetLockFileLocation();
                 File.Delete(lockFilePath);
+            }
+        }
+
+        private static async Task DelayBeforeExitAsync(AppOptions options, CancellationToken token)
+        {
+            if (options.DelaySeconds > 0)
+            {
+                await Task.Delay(options.DelaySeconds * 1000, token);
             }
         }
 
