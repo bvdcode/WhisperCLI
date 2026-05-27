@@ -3,8 +3,6 @@ using NAudio.Wave;
 using Whisper.net;
 using System.Text;
 using Xabe.FFmpeg;
-using System.Diagnostics;
-using Xabe.FFmpeg.Downloader;
 
 namespace WhisperCLI.Transcribers
 {
@@ -13,50 +11,9 @@ namespace WhisperCLI.Transcribers
         private readonly ILogger _logger;
         private readonly int _microphoneIndex;
 
-        private static void Exec(string cmd)
-        {
-            var escapedArgs = cmd.Replace("\"", "\\\"");
-
-            using var process = new Process
-            {
-                StartInfo = new ProcessStartInfo
-                {
-                    RedirectStandardOutput = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                    WindowStyle = ProcessWindowStyle.Hidden,
-                    FileName = "/bin/bash",
-                    Arguments = $"-c \"{escapedArgs}\""
-                }
-            };
-
-            process.Start();
-            process.WaitForExit();
-        }
-
         private async Task CheckFfmpegAsync(CancellationToken token)
         {
-            string tempPath = Path.GetTempPath();
-            string workingDirectory = Path.Combine(tempPath, "WhisperCLI", "FFMpeg");
-            if (!Directory.Exists(workingDirectory))
-            {
-                Directory.CreateDirectory(workingDirectory);
-            }
-            FFmpeg.SetExecutablesPath(workingDirectory);
-            _logger.Information("Checking FFmpeg...");
-            if (Directory.GetFiles(workingDirectory).Length == 0)
-            {
-                _logger.Information("FFmpeg not found - downloading...");
-                var task1 = FFmpegDownloader.GetLatestVersion(FFmpegVersion.Official, FFmpeg.ExecutablesPath, new FFMpegDownloadingProgress(_logger));
-                var task2 = Task.Delay(600_000, token);
-                await Task.WhenAny(task1, task2);
-                _logger.Information("FFmpeg downloaded");
-                if (Environment.OSVersion.Platform == PlatformID.Unix)
-                {
-                    Exec("chmod +x " + Path.Combine(workingDirectory, "ffmpeg"));
-                    Exec("chmod +x " + Path.Combine(workingDirectory, "ffprobe"));
-                }
-            }
+            await FFmpegBootstrapper.EnsureAvailableAsync(_logger, token).ConfigureAwait(false);
         }
 
         private async Task<FileInfo> TranscodeWavToMp3Async(string wavPath, CancellationToken token)
@@ -106,10 +63,7 @@ namespace WhisperCLI.Transcribers
                 WaveFormat = new WaveFormat(16000, 1)
             };
 
-            string tempPath = Path.GetTempPath();
-            string workingDirectory = Path.Combine(tempPath, "WhisperCLI", "Recordings");
-            var di = Directory.CreateDirectory(workingDirectory);
-            string wavOutputPath = Path.Combine(di.FullName, "recording-" + DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".wav");
+            string wavOutputPath = Path.Combine(AppPaths.RecordingsDirectory, "recording-" + DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".wav");
             using var waveWriter = new WaveFileWriter(wavOutputPath, waveIn.WaveFormat);
             waveIn.DataAvailable += (s, a) =>
             {
@@ -162,9 +116,7 @@ namespace WhisperCLI.Transcribers
                 _logger.Information("Transcription saved to {outputFile}", outputFile);
                 if (saveTranscript)
                 {
-                    string path = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-                    string saveDirectory = Path.Combine(path, "WhisperCLI", "Transcripts");
-                    Directory.CreateDirectory(saveDirectory);
+                    string saveDirectory = AppPaths.TranscriptsDirectory;
                     string savedFilePath = Path.Combine(saveDirectory, Path.GetFileName(outputFile));
                     File.Copy(outputFile, savedFilePath, true);
                     

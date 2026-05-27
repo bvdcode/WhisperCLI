@@ -8,7 +8,6 @@ using Whisper.net.Ggml;
 using System.Diagnostics;
 using Whisper.net.Logger;
 using WhisperCLI.Transcribers;
-using Xabe.FFmpeg.Downloader;
 
 namespace WhisperCLI
 {
@@ -252,45 +251,7 @@ namespace WhisperCLI
 
         private static async Task CheckFfmpegAsync(Logger logger, CancellationToken token)
         {
-            string tempPath = Path.GetTempPath();
-            string workingDirectory = Path.Combine(tempPath, "WhisperCLI", "FFMpeg");
-            Directory.CreateDirectory(workingDirectory);
-            FFmpeg.SetExecutablesPath(workingDirectory);
-            logger.Information("Checking FFmpeg...");
-            if (Directory.GetFiles(workingDirectory).Length == 0)
-            {
-                logger.Information("FFmpeg not found - downloading...");
-                var task1 = FFmpegDownloader.GetLatestVersion(FFmpegVersion.Official, FFmpeg.ExecutablesPath, new FFMpegDownloadingProgress(logger));
-                var task2 = Task.Delay(600_000, token);
-                await Task.WhenAny(task1, task2);
-                logger.Information("FFmpeg downloaded");
-                if (Environment.OSVersion.Platform == PlatformID.Unix)
-                {
-                    Exec("chmod +x " + Path.Combine(workingDirectory, "ffmpeg"));
-                    Exec("chmod +x " + Path.Combine(workingDirectory, "ffprobe"));
-                }
-            }
-        }
-
-        private static void Exec(string cmd)
-        {
-            var escapedArgs = cmd.Replace("\"", "\\\"");
-
-            using var process = new Process
-            {
-                StartInfo = new ProcessStartInfo
-                {
-                    RedirectStandardOutput = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                    WindowStyle = ProcessWindowStyle.Hidden,
-                    FileName = "/bin/bash",
-                    Arguments = $"-c \"{escapedArgs}\""
-                }
-            };
-
-            process.Start();
-            process.WaitForExit();
+            await FFmpegBootstrapper.EnsureAvailableAsync(logger, token).ConfigureAwait(false);
         }
 
         private static async Task<List<FileInfo>> TranscribeFilesAsync(
@@ -316,10 +277,7 @@ namespace WhisperCLI
 
         private static string GetLockFileLocation()
         {
-            string tempPath = Path.GetTempPath();
-            string workingDirectory = Path.Combine(tempPath, "WhisperCLI");
-            var di = Directory.CreateDirectory(workingDirectory);
-            return Path.Combine(di.FullName, "whisper.lock");
+            return AppPaths.LockFilePath;
         }
 
         private static bool CheckLockfile(Logger logger)
@@ -387,11 +345,7 @@ namespace WhisperCLI
         private static async Task<FileInfo> GetWhisperModelPathAsync(GgmlType model, Logger logger, CancellationToken token)
         {
             string modelName = $"ggml-{model.ToString().ToLower()}.bin";
-            string tempPath = Path.GetTempPath();
-            string workingDirectory = Path.Combine(tempPath, "WhisperCLI", "Models");
-            var di = Directory.CreateDirectory(workingDirectory);
-
-            string filePath = Path.Combine(di.FullName, modelName);
+            string filePath = Path.Combine(AppPaths.ModelsDirectory, modelName);
             string partialPath = filePath + ".tmp";
 
             // Clean up leftover partial download from a previous crashed/cancelled run.
