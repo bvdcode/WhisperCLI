@@ -26,13 +26,13 @@ namespace WhisperCLI
 
                 logger.Information("Checking FFmpeg...");
 
-                string appDataDirectory = AppPaths.FFmpegDirectory;
-                if (TryConfigureFromDirectory(appDataDirectory, logger, "application data"))
+                if (TryConfigureFromPath(logger))
                 {
                     return;
                 }
 
-                if (TryConfigureFromPath(logger))
+                string appDataDirectory = AppPaths.FFmpegDirectory;
+                if (TryConfigureFromDirectory(appDataDirectory, logger, "application data"))
                 {
                     return;
                 }
