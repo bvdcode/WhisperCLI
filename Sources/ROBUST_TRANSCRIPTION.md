@@ -125,3 +125,10 @@ They record the exact chunk timestamps, model and recovery strategy selected, re
 attempts, repetition score/reasons, elapsed time, and whether the live loop detector aborted an
 attempt. This should make tuning a specific failure reproducible instead of relying on manual
 trial-and-error.
+
+## FFmpeg normalization implementation
+
+FFmpeg is downloaded through `Xabe.FFmpeg.Downloader`, but audio normalization is invoked directly
+with `System.Diagnostics.Process` and `ProcessStartInfo.ArgumentList`. This deliberately avoids the
+Xabe conversion argument builder for the `-i`/output command. It is safe for paths containing spaces
+or non-ASCII characters and, on failure, the exception now includes the useful tail of FFmpeg stderr.

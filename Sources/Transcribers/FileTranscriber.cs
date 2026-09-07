@@ -755,32 +755,114 @@ namespace WhisperCLI.Transcribers
             Directory.CreateDirectory(workingDirectory);
             string tempOutputPath = Path.Combine(workingDirectory, $"{Guid.NewGuid():N}.wav");
 
-            var conversion = FFmpeg.Conversions.New();
-            conversion.AddParameter($"-y -i \"{inputFile.FullName}\"", ParameterPosition.PreInput);
-            conversion.SetOutput(tempOutputPath);
-            conversion.AddParameter("-vn -ar 16000 -ac 1 -c:a pcm_s16le", ParameterPosition.PostInput);
+            // Do not use Xabe's conversion argument builder here. Long-file transcription accepts
+            // arbitrary user paths (spaces, Cyrillic, etc.), and this call is simple enough that
+            // invoking ffmpeg directly is both safer and easier to diagnose. ArgumentList passes
+            // each value verbatim without shell parsing or hand-written quoting.
+            string ffmpegPath = Path.Combine(
+                FFmpeg.ExecutablesPath,
+                OperatingSystem.IsWindows() ? "ffmpeg.exe" : "ffmpeg");
 
-            int lastLogged = -10;
-            conversion.OnProgress += (_, args) =>
+            ProcessStartInfo startInfo = new()
             {
-                int bucket = ((int)args.Percent / 10) * 10;
-                if (bucket >= lastLogged + 10)
-                {
-                    lastLogged = bucket;
-                    _logger.Information("Converting to WAV: {Percent}%", args.Percent);
-                }
+                FileName = ffmpegPath,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardError = true
             };
+
+            startInfo.ArgumentList.Add("-hide_banner");
+            startInfo.ArgumentList.Add("-nostdin");
+            startInfo.ArgumentList.Add("-y");
+            startInfo.ArgumentList.Add("-i");
+            startInfo.ArgumentList.Add(inputFile.FullName);
+            startInfo.ArgumentList.Add("-map");
+            startInfo.ArgumentList.Add("0:a:0");
+            startInfo.ArgumentList.Add("-vn");
+            startInfo.ArgumentList.Add("-sn");
+            startInfo.ArgumentList.Add("-dn");
+            startInfo.ArgumentList.Add("-ac");
+            startInfo.ArgumentList.Add("1");
+            startInfo.ArgumentList.Add("-ar");
+            startInfo.ArgumentList.Add("16000");
+            startInfo.ArgumentList.Add("-c:a");
+            startInfo.ArgumentList.Add("pcm_s16le");
+            startInfo.ArgumentList.Add("-f");
+            startInfo.ArgumentList.Add("wav");
+            startInfo.ArgumentList.Add(tempOutputPath);
 
             try
             {
-                await conversion.Start(token);
-                return new FileInfo(tempOutputPath);
+                using Process process = new() { StartInfo = startInfo };
+                if (!process.Start())
+                {
+                    throw new InvalidOperationException($"Failed to start FFmpeg: {ffmpegPath}");
+                }
+
+                Task<string> stderrTask = process.StandardError.ReadToEndAsync();
+                using CancellationTokenRegistration registration = token.Register(() =>
+                {
+                    try
+                    {
+                        if (!process.HasExited)
+                        {
+                            process.Kill(entireProcessTree: true);
+                        }
+                    }
+                    catch
+                    {
+                        // Best-effort cancellation. WaitForExitAsync below remains authoritative.
+                    }
+                });
+
+                try
+                {
+                    await process.WaitForExitAsync(token);
+                }
+                catch (OperationCanceledException)
+                {
+                    TryDelete(tempOutputPath);
+                    throw;
+                }
+
+                string stderr = await stderrTask;
+                if (process.ExitCode != 0)
+                {
+                    throw new InvalidOperationException(
+                        $"FFmpeg failed to normalize '{inputFile.FullName}' (exit code {process.ExitCode}). " +
+                        $"FFmpeg output:\n{Tail(stderr, 8000)}");
+                }
+
+                FileInfo output = new(tempOutputPath);
+                output.Refresh();
+                if (!output.Exists || output.Length <= 44)
+                {
+                    throw new InvalidOperationException(
+                        $"FFmpeg reported success but did not create a valid WAV file at '{tempOutputPath}'. " +
+                        $"FFmpeg output:\n{Tail(stderr, 8000)}");
+                }
+
+                _logger.Information(
+                    "Temporary WAV prepared successfully: {outputPath} ({sizeBytes} bytes)",
+                    output.FullName,
+                    output.Length);
+                return output;
             }
             catch
             {
                 TryDelete(tempOutputPath);
                 throw;
             }
+        }
+
+        private static string Tail(string value, int maxCharacters)
+        {
+            if (string.IsNullOrEmpty(value) || value.Length <= maxCharacters)
+            {
+                return value;
+            }
+
+            return "..." + value[^maxCharacters..];
         }
 
         private static void EnsureExecutable(string path)
