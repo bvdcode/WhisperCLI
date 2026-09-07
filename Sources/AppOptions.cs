@@ -1,4 +1,4 @@
-﻿using CommandLine;
+using CommandLine;
 using Whisper.net.Ggml;
 
 namespace WhisperCLI
@@ -19,6 +19,14 @@ namespace WhisperCLI
         [Option("fallback-models", Required = false, Default = "auto",
             HelpText = "Fallback models for suspicious chunks: 'auto', 'none', or a comma-separated list (for example LargeV3,LargeV2). Models are loaded lazily only when needed.")]
         public string FallbackModels { get; set; } = "auto";
+
+        [Option("runtime", Required = false, Default = "auto",
+            HelpText = "Whisper native runtime: auto, gpu, cuda, cuda12, or cpu. In auto mode an NVIDIA GPU detected by nvidia-smi is required to use CUDA instead of silently falling back to CPU.")]
+        public string Runtime { get; set; } = "auto";
+
+        [Option("gpu-device", Required = false, Default = 0,
+            HelpText = "GPU device index passed to Whisper. Default: 0.")]
+        public int GpuDevice { get; set; } = 0;
 
         [Option("use-vad", Required = false, Default = true,
             HelpText = "Use Silero VAD to place chunk boundaries at speech/silence transitions. Specify '--use-vad false' to disable. Default: true.")]

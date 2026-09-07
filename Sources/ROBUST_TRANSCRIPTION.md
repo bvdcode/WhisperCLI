@@ -132,3 +132,53 @@ FFmpeg is downloaded through `Xabe.FFmpeg.Downloader`, but audio normalization i
 with `System.Diagnostics.Process` and `ProcessStartInfo.ArgumentList`. This deliberately avoids the
 Xabe conversion argument builder for the `-i`/output command. It is safe for paths containing spaces
 or non-ASCII characters and, on failure, the exception now includes the useful tail of FFmpeg stderr.
+
+## GPU runtime selection (v3)
+
+WhisperCLI now makes native-runtime selection visible. On startup it probes `nvidia-smi`.
+
+- `--runtime auto` (default): if an NVIDIA GPU is detected, CUDA is expected. The application refuses to silently run Large models on CPU if Whisper.net falls back to a CPU runtime.
+- `--runtime gpu`: allow CUDA 13 or CUDA 12 only.
+- `--runtime cuda`: force the CUDA 13 Whisper.net runtime.
+- `--runtime cuda12`: force the CUDA 12 Whisper.net runtime.
+- `--runtime cpu`: intentionally use CPU.
+- `--gpu-device N`: select the GPU device index passed to Whisper (default 0).
+
+Whisper.net 1.9.1 provides both CUDA 13 and CUDA 12 runtimes. The host must still have the matching NVIDIA runtime/toolkit libraries available. If CUDA cannot be loaded, WhisperCLI now stops with an explicit error instead of spending minutes per chunk on accidental CPU inference.
+
+Example:
+
+```bash
+dotnet run -- -m LargeV3 --runtime cuda12 --language ru "/path/to/recording.mp3"
+```
+
+The startup log prints the detected NVIDIA GPU, the selected `RuntimeLibrary`, and Whisper's native system information. `GPU acceleration active=True` is the line to look for.
+
+## Incremental results and cancellation (v3)
+
+Long-file transcription now writes usable progress after every completed top-level chunk:
+
+```text
+recording.partial.txt
+recording.partial.srt
+recording.partial.vtt
+recording.transcription.checkpoint.json
+```
+
+These files live next to the input recording. They are rebuilt from the checkpoint when a run resumes, so completed chunks remain readable even if the process is interrupted. On successful completion the final `recording.txt/.srt/.vtt` files are written and the `.partial.*` files are removed.
+
+Cancellation is two-stage:
+
+1. First `Ctrl+C`: request cooperative cancellation and preserve all completed chunks/checkpoints.
+2. Second `Ctrl+C`: terminate immediately if native inference does not return promptly.
+
+## v4 installation note
+
+The `WhisperCLI_Robust_Transcription_v4_SourcesOverlay.zip` archive is intentionally rooted at the contents of the `Sources` directory. Extract it **while inside your existing `WhisperCLI/Sources` directory**. At startup, a correct v4 installation prints:
+
+```
+WhisperCLI robust build: v4-gpu-runtime
+Whisper runtime preference: ...
+```
+
+If those lines are absent, you are running an older source tree/build.

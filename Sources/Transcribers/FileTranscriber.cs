@@ -1,4 +1,4 @@
-﻿using NAudio.Wave;
+using NAudio.Wave;
 using Serilog;
 using System.Diagnostics;
 using System.Security.Cryptography;
@@ -133,6 +133,23 @@ namespace WhisperCLI.Transcribers
                     ? await LoadCheckpointAsync(checkpointPath, inputFile, fingerprint, token)
                     : NewCheckpoint(inputFile, fingerprint);
 
+                string partialTextPath = BuildSidecarPath(inputFile, ".partial.txt");
+                string partialSrtPath = BuildSidecarPath(inputFile, ".partial.srt");
+                string partialVttPath = BuildSidecarPath(inputFile, ".partial.vtt");
+                _logger.Information("Incremental transcript: {partialTextPath}", partialTextPath);
+                _logger.Information("Incremental subtitles: {partialSrtPath} and {partialVttPath}", partialSrtPath, partialVttPath);
+                _logger.Information("Resume checkpoint: {checkpointPath}", checkpointPath);
+
+                if (checkpoint.CompletedChunks.Count > 0)
+                {
+                    await WriteProgressOutputsAsync(inputFile, checkpoint.CompletedChunks, chunks.Count, CancellationToken.None);
+                }
+
+                // VAD uses the same native Whisper runtime and can be the first operation that
+                // causes Whisper.net to select CUDA vs CPU. Validate only after restoring any
+                // previous checkpoint so already-completed work remains immediately readable.
+                WhisperRuntimeManager.ValidateLoadedRuntime(_logger);
+
                 string? lockedLanguage = null;
                 if (!IsAutoLanguage(options.Language))
                 {
@@ -147,7 +164,7 @@ namespace WhisperCLI.Transcribers
                     }
                 }
 
-                using ModelFactoryCache factories = new(_modelResolver, _logger);
+                using ModelFactoryCache factories = new(_modelResolver, _logger, options);
                 List<ChunkTranscriptionResult> completed = [];
 
                 for (int i = 0; i < chunks.Count; i++)
@@ -189,10 +206,11 @@ namespace WhisperCLI.Transcribers
                             .OrderBy(c => c.Chunk.Start)
                             .ToList();
                         checkpoint.UpdatedUtc = DateTime.UtcNow;
-                        await SaveJsonAtomicAsync(checkpointPath, checkpoint, token);
+                        await SaveJsonAtomicAsync(checkpointPath, checkpoint, CancellationToken.None);
                     }
 
                     completed.Add(result);
+                    await WriteProgressOutputsAsync(inputFile, completed, chunks.Count, CancellationToken.None);
 
                     if (IsAutoLanguage(options.Language) && options.LockDetectedLanguage && string.IsNullOrWhiteSpace(lockedLanguage))
                     {
@@ -533,6 +551,31 @@ namespace WhisperCLI.Transcribers
             }
         }
 
+        private async Task WriteProgressOutputsAsync(
+            FileInfo inputFile,
+            IReadOnlyList<ChunkTranscriptionResult> completedChunks,
+            int totalChunks,
+            CancellationToken token)
+        {
+            List<TranscriptSegment> segments = completedChunks
+                .SelectMany(FlattenSegments)
+                .OrderBy(s => s.Start)
+                .ToList();
+
+            string textPath = BuildSidecarPath(inputFile, ".partial.txt");
+            string srtPath = BuildSidecarPath(inputFile, ".partial.srt");
+            string vttPath = BuildSidecarPath(inputFile, ".partial.vtt");
+
+            await WriteTextAtomicAsync(textPath, AssembleText(segments), token);
+            await WriteTextAtomicAsync(srtPath, BuildSrt(segments), token);
+            await WriteTextAtomicAsync(vttPath, BuildVtt(segments), token);
+
+            int completedTopLevel = completedChunks.Count;
+            _logger.Information(
+                "Progress saved: {completed}/{total} chunks -> {partialTextPath}",
+                completedTopLevel, totalChunks, textPath);
+        }
+
         private async Task<FileInfo> WriteOutputsAsync(FileInfo inputFile, TranscriptionRunReport report, CancellationToken token)
         {
             List<TranscriptSegment> segments = report.Chunks
@@ -548,9 +591,9 @@ namespace WhisperCLI.Transcribers
             string reviewPath = BuildSidecarPath(inputFile, ".transcription.review.txt");
 
             string text = AssembleText(segments);
-            await File.WriteAllTextAsync(textPath, text, Encoding.UTF8, token);
-            await File.WriteAllTextAsync(srtPath, BuildSrt(segments), Encoding.UTF8, token);
-            await File.WriteAllTextAsync(vttPath, BuildVtt(segments), Encoding.UTF8, token);
+            await WriteTextAtomicAsync(textPath, text, token);
+            await WriteTextAtomicAsync(srtPath, BuildSrt(segments), token);
+            await WriteTextAtomicAsync(vttPath, BuildVtt(segments), token);
             await SaveJsonAtomicAsync(jsonPath, report, token);
             await File.WriteAllTextAsync(logPath, BuildDiagnosticLog(report), Encoding.UTF8, token);
 
@@ -563,6 +606,10 @@ namespace WhisperCLI.Transcribers
             {
                 TryDelete(reviewPath);
             }
+
+            TryDelete(BuildSidecarPath(inputFile, ".partial.txt"));
+            TryDelete(BuildSidecarPath(inputFile, ".partial.srt"));
+            TryDelete(BuildSidecarPath(inputFile, ".partial.vtt"));
 
             _logger.Information("Transcription complete: {textPath}", textPath);
             _logger.Information("Subtitles: {srtPath} and {vttPath}", srtPath, vttPath);
@@ -1086,6 +1133,13 @@ namespace WhisperCLI.Transcribers
             };
         }
 
+        private static async Task WriteTextAtomicAsync(string path, string text, CancellationToken token)
+        {
+            string temp = path + ".tmp";
+            await File.WriteAllTextAsync(temp, text, Encoding.UTF8, token);
+            File.Move(temp, path, overwrite: true);
+        }
+
         private static async Task SaveJsonAtomicAsync<T>(string path, T value, CancellationToken token)
         {
             string temp = path + ".tmp";
@@ -1178,15 +1232,18 @@ namespace WhisperCLI.Transcribers
         {
             private readonly Func<GgmlType, CancellationToken, Task<FileInfo>> _resolver;
             private readonly ILogger _logger;
+            private readonly AppOptions _options;
             private GgmlType? _loadedModel;
             private WhisperFactory? _factory;
 
             public ModelFactoryCache(
                 Func<GgmlType, CancellationToken, Task<FileInfo>> resolver,
-                ILogger logger)
+                ILogger logger,
+                AppOptions options)
             {
                 _resolver = resolver;
                 _logger = logger;
+                _options = options;
             }
 
             public async Task<WhisperFactory> GetAsync(GgmlType model, CancellationToken token)
@@ -1213,7 +1270,10 @@ namespace WhisperCLI.Transcribers
                 }
 
                 _logger.Information("Loading Whisper model: {model}", model);
-                _factory = WhisperFactory.FromPath(modelFile.FullName);
+                _factory = WhisperFactory.FromPath(
+                    modelFile.FullName,
+                    WhisperRuntimeManager.CreateFactoryOptions(_options));
+                WhisperRuntimeManager.ValidateLoadedRuntime(_logger);
                 _loadedModel = model;
                 return _factory;
             }

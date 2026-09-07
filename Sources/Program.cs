@@ -1,4 +1,4 @@
-﻿using CommandLine;
+using CommandLine;
 using Serilog;
 using Serilog.Events;
 using System.Diagnostics;
@@ -36,11 +36,6 @@ namespace WhisperCLI
             Console.OutputEncoding = Encoding.UTF8;
 
             using CancellationTokenSource cts = new();
-            Console.CancelKeyPress += (_, e) =>
-            {
-                e.Cancel = true;
-                cts.Cancel();
-            };
 
             using var logger = new LoggerConfiguration()
                 .MinimumLevel.Is(options.Verbose ? LogEventLevel.Debug : LogEventLevel.Information)
@@ -55,6 +50,25 @@ namespace WhisperCLI
                     logger.Debug("[Whisper] [{level}] {text}", level.ToString().ToUpperInvariant(), text.Trim());
                 }
             });
+
+            int cancelPressCount = 0;
+            ConsoleCancelEventHandler cancelHandler = (_, e) =>
+            {
+                int press = Interlocked.Increment(ref cancelPressCount);
+                if (press == 1)
+                {
+                    e.Cancel = true;
+                    logger.Warning("Cancellation requested. Completed chunks are already saved. Press Ctrl+C again to terminate immediately.");
+                    cts.Cancel();
+                }
+                else
+                {
+                    // Do not cancel the second SIGINT: let the OS terminate the process even
+                    // if native Whisper code does not return from cooperative cancellation.
+                    e.Cancel = false;
+                }
+            };
+            Console.CancelKeyPress += cancelHandler;
 
             SingleInstanceLock? instanceLock = null;
             try
@@ -73,12 +87,18 @@ namespace WhisperCLI
                 FileInfo result;
                 string osType = Environment.OSVersion.Platform.ToString();
                 logger.Information("Operating System: {osType}", osType);
+                logger.Information("WhisperCLI robust build: v4-gpu-runtime");
+
+                WhisperRuntimeManager.Configure(options, logger);
 
                 if (string.IsNullOrWhiteSpace(options.InputFilePath))
                 {
                     // Microphone recordings are short and keep the lightweight path.
                     FileInfo whisperModelInfo = await GetWhisperModelPathAsync(options.Model, logger, cts.Token);
-                    using WhisperFactory microphoneFactory = WhisperFactory.FromPath(whisperModelInfo.FullName);
+                    using WhisperFactory microphoneFactory = WhisperFactory.FromPath(
+                        whisperModelInfo.FullName,
+                        WhisperRuntimeManager.CreateFactoryOptions(options));
+                    WhisperRuntimeManager.ValidateLoadedRuntime(logger);
                     await using WhisperProcessor processor = CreateMicrophoneProcessor(microphoneFactory, options, logger);
 
                     logger.Information("Press {stopKey} to stop recording.", options.StopKey);
@@ -108,8 +128,8 @@ namespace WhisperCLI
                     }
 
                     logger.Information(
-                        "Robust long-file mode: primary={primary}, fallbacks={fallbacks}, language={language}, VAD={vad}, chunk={chunk}s",
-                        options.Model, options.FallbackModels, options.Language, options.UseVad, options.ChunkSeconds);
+                        "Robust long-file mode: primary={primary}, fallbacks={fallbacks}, language={language}, VAD={vad}, chunk={chunk}s, runtime={runtime}",
+                        options.Model, options.FallbackModels, options.Language, options.UseVad, options.ChunkSeconds, options.Runtime);
 
                     var transcriber = new FileTranscriber(
                         logger,
@@ -154,6 +174,7 @@ namespace WhisperCLI
             }
             finally
             {
+                Console.CancelKeyPress -= cancelHandler;
                 instanceLock?.Dispose();
             }
         }
@@ -162,6 +183,13 @@ namespace WhisperCLI
         {
             ArgumentOutOfRangeException.ThrowIfNegative(options.DelaySeconds, nameof(options.DelaySeconds));
             ArgumentOutOfRangeException.ThrowIfNegative(options.MicrophoneIndex, nameof(options.MicrophoneIndex));
+            ArgumentOutOfRangeException.ThrowIfNegative(options.GpuDevice, nameof(options.GpuDevice));
+
+            string runtime = (options.Runtime ?? string.Empty).Trim().ToLowerInvariant();
+            if (runtime is not ("auto" or "gpu" or "nvidia" or "cuda" or "cuda13" or "cuda12" or "cpu"))
+            {
+                throw new ArgumentException("Runtime must be one of: auto, gpu, cuda, cuda12, cpu.", nameof(options.Runtime));
+            }
 
             if (options.ChunkSeconds < 20)
             {
