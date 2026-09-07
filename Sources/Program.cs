@@ -1,10 +1,10 @@
-﻿using Serilog;
+﻿using CommandLine;
+using Serilog;
+using Serilog.Events;
+using System.Diagnostics;
 using System.Text;
 using Whisper.net;
-using Serilog.Core;
-using Serilog.Events;
 using Whisper.net.Ggml;
-using System.Diagnostics;
 using Whisper.net.Logger;
 using WhisperCLI.Transcribers;
 
@@ -14,19 +14,40 @@ namespace WhisperCLI
     {
         public static async Task Main(string[] args)
         {
-            AppOptions options = CommandLine.Parser.Default.ParseArguments<AppOptions>(args).Value;
-            ArgumentOutOfRangeException.ThrowIfNegative(options.DelaySeconds, "Delay seconds must be non-negative.");
-            Console.OutputEncoding = Encoding.UTF8;
-            CancellationTokenSource cts = new();
-            Console.CancelKeyPress += (s, e) =>
+            AppOptions? options = null;
+            ParserResult<AppOptions> parseResult = Parser.Default.ParseArguments<AppOptions>(args);
+            parseResult.WithParsed(parsed => options = parsed);
+            if (options is null)
             {
-                e.Cancel = true; // Prevent the process from terminating immediately
-                cts.Cancel(); // Signal cancellation
+                return;
+            }
+
+            try
+            {
+                ValidateOptions(options);
+            }
+            catch (ArgumentException ex)
+            {
+                Console.Error.WriteLine($"Invalid command-line options: {ex.Message}");
+                Environment.ExitCode = 2;
+                return;
+            }
+
+            Console.OutputEncoding = Encoding.UTF8;
+
+            using CancellationTokenSource cts = new();
+            Console.CancelKeyPress += (_, e) =>
+            {
+                e.Cancel = true;
+                cts.Cancel();
             };
-            Logger logger = new LoggerConfiguration()
+
+            using var logger = new LoggerConfiguration()
                 .MinimumLevel.Is(options.Verbose ? LogEventLevel.Debug : LogEventLevel.Information)
                 .WriteTo.Console()
                 .CreateLogger();
+            Log.Logger = logger;
+
             LogProvider.AddLogger((level, text) =>
             {
                 if (!string.IsNullOrWhiteSpace(text))
@@ -34,174 +55,325 @@ namespace WhisperCLI
                     logger.Debug("[Whisper] [{level}] {text}", level.ToString().ToUpperInvariant(), text.Trim());
                 }
             });
-            if (CheckLockfile(logger))
-            {
-                await Task.Delay(options.DelaySeconds * 1000, cts.Token);
-                return;
-            }
-            FileInfo whisperModelInfo = await GetWhisperModelPathAsync(options.Model, logger, cts.Token);
-            using var processor = CreateProcessor(options.Model, whisperModelInfo, logger);
-            FileInfo result;
 
-            // Get OS type
-            string osType = Environment.OSVersion.Platform.ToString();
-            logger.Information("Operating System: {osType}", osType);
-            if (string.IsNullOrWhiteSpace(options.InputFilePath))
+            SingleInstanceLock? instanceLock = null;
+            try
             {
-                logger.Information("Press {stopKey} to stop recording.", options.StopKey);
-                if (osType == "Unix")
+                if (options.UseLockfile)
                 {
-                    result = await new NetCoreAudioMicrophoneTranscriber(logger, options.MicrophoneIndex)
-                        .TranscribeAudioAsync(processor, () => CheckCancellation(options.StopKey), cts.Token);
+                    instanceLock = SingleInstanceLock.TryAcquire(logger);
+                    if (instanceLock is null)
+                    {
+                        logger.Warning("Another WhisperCLI instance appears to be running.");
+                        await DelayBeforeExitAsync(options.DelaySeconds, cts.Token);
+                        return;
+                    }
                 }
-                else if (osType == "Win32NT")
+
+                FileInfo result;
+                string osType = Environment.OSVersion.Platform.ToString();
+                logger.Information("Operating System: {osType}", osType);
+
+                if (string.IsNullOrWhiteSpace(options.InputFilePath))
                 {
-                    result = await new MicrophoneTranscriber(logger, options.MicrophoneIndex)
-                        .TranscribeAudioAsync(processor, () => CheckCancellation(options.StopKey), cts.Token);
+                    // Microphone recordings are short and keep the lightweight path.
+                    FileInfo whisperModelInfo = await GetWhisperModelPathAsync(options.Model, logger, cts.Token);
+                    using WhisperFactory microphoneFactory = WhisperFactory.FromPath(whisperModelInfo.FullName);
+                    await using WhisperProcessor processor = CreateMicrophoneProcessor(microphoneFactory, options, logger);
+
+                    logger.Information("Press {stopKey} to stop recording.", options.StopKey);
+                    if (osType == "Unix")
+                    {
+                        result = await new NetCoreAudioMicrophoneTranscriber(logger, options.MicrophoneIndex)
+                            .TranscribeAudioAsync(processor, () => CheckCancellation(options.StopKey), cts.Token);
+                    }
+                    else if (osType == "Win32NT")
+                    {
+                        result = await new MicrophoneTranscriber(logger, options.MicrophoneIndex)
+                            .TranscribeAudioAsync(processor, () => CheckCancellation(options.StopKey), cts.Token);
+                    }
+                    else
+                    {
+                        logger.Error("Unsupported operating system: {osType}. Only Windows and Unix-like systems are supported.", osType);
+                        return;
+                    }
                 }
                 else
                 {
-                    logger.Error("Unsupported operating system: {osType}. Only Windows and Unix-like systems tested.", osType);
-                    return;
-                }
-            }
-            else
-            {
-                FileInfo inputFile = new(options.InputFilePath);
-                if (!inputFile.Exists)
-                {
-                    logger.Error("Input file does not exist: {inputFilePath}", options.InputFilePath);
-                    return;
-                }
-                result = await new FileTranscriber(logger)
-                    .TranscribeAudioAsync(inputFile, processor, cts.Token);
-            }
-            if (options.OpenTextFile)
-            {
-                OpenFile(result);
-            }
-            if (options.CopyToClipboard)
-            {
-                try
-                {
-                    string text = File.ReadAllText(result.FullName, Encoding.UTF8);
-                    TextCopy.ClipboardService.SetText(text);
-                    logger.Information("Transcription result copied to clipboard.");
-                }
-                catch (Exception ex)
-                {
-                    logger.Error(ex, "Failed to copy transcription result to clipboard.");
-                }
-            }
-            await Task.Delay(options.DelaySeconds * 1000, cts.Token);
-        }
+                    FileInfo inputFile = new(options.InputFilePath);
+                    if (!inputFile.Exists)
+                    {
+                        logger.Error("Input file does not exist: {inputFilePath}", options.InputFilePath);
+                        return;
+                    }
 
-        private static bool CheckLockfile(Logger logger)
-        {
-            string tempPath = Path.GetTempPath();
-            string workingDirectory = Path.Combine(tempPath, "WhisperCLI");
-            var di = Directory.CreateDirectory(workingDirectory);
-            string lockFilePath = Path.Combine(di.FullName, "whisper.lock");
-            if (File.Exists(lockFilePath))
-            {
-                logger.Warning("Lock file exists. WhisperCLI may already be running.");
-                return true;
+                    logger.Information(
+                        "Robust long-file mode: primary={primary}, fallbacks={fallbacks}, language={language}, VAD={vad}, chunk={chunk}s",
+                        options.Model, options.FallbackModels, options.Language, options.UseVad, options.ChunkSeconds);
+
+                    var transcriber = new FileTranscriber(
+                        logger,
+                        (model, token) => GetWhisperModelPathAsync(model, logger, token));
+                    result = await transcriber.TranscribeRobustAsync(inputFile, options, cts.Token);
+                }
+
+                if (options.OpenTextFile)
+                {
+                    OpenFile(result);
+                }
+
+                if (options.CopyToClipboard && result.Exists &&
+                    string.Equals(result.Extension, ".txt", StringComparison.OrdinalIgnoreCase))
+                {
+                    try
+                    {
+                        string text = await File.ReadAllTextAsync(result.FullName, Encoding.UTF8, cts.Token);
+                        TextCopy.ClipboardService.SetText(text);
+                        logger.Information("Transcription result copied to clipboard.");
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        logger.Error(ex, "Failed to copy transcription result to clipboard.");
+                    }
+                }
+
+                await DelayBeforeExitAsync(options.DelaySeconds, cts.Token);
             }
-            try
+            catch (OperationCanceledException) when (cts.IsCancellationRequested)
             {
-                using (File.Create(lockFilePath)) { }
-                logger.Debug("Lock file created: {lockFilePath}", lockFilePath);
-                return false;
+                logger.Information("Operation cancelled.");
             }
-            catch (IOException ex)
+            catch (Exception ex)
             {
-                logger.Error(ex, "Failed to create lock file: {lockFilePath}", lockFilePath);
-                return true;
+                logger.Fatal(ex, "WhisperCLI terminated because of an unhandled error.");
+                Environment.ExitCode = -1;
             }
             finally
             {
-                // Ensure the lock file is deleted on exit
-                AppDomain.CurrentDomain.ProcessExit += (s, e) => File.Delete(lockFilePath);
-                AppDomain.CurrentDomain.UnhandledException += (s, e) => File.Delete(lockFilePath);
-                Console.CancelKeyPress += (s, e) => File.Delete(lockFilePath);
+                instanceLock?.Dispose();
             }
+        }
+
+        private static void ValidateOptions(AppOptions options)
+        {
+            ArgumentOutOfRangeException.ThrowIfNegative(options.DelaySeconds, nameof(options.DelaySeconds));
+            ArgumentOutOfRangeException.ThrowIfNegative(options.MicrophoneIndex, nameof(options.MicrophoneIndex));
+
+            if (options.ChunkSeconds < 20)
+            {
+                throw new ArgumentOutOfRangeException(nameof(options.ChunkSeconds), "Chunk duration must be at least 20 seconds.");
+            }
+            if (options.MaxChunkSeconds < options.ChunkSeconds)
+            {
+                throw new ArgumentOutOfRangeException(nameof(options.MaxChunkSeconds), "Max chunk duration must be greater than or equal to target chunk duration.");
+            }
+            if (options.MaxContextTokens < 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(options.MaxContextTokens), "Max context tokens must be non-negative.");
+            }
+            if (options.EntropyThreshold <= 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(options.EntropyThreshold), "Entropy threshold must be positive.");
+            }
+            if (options.Temperature < 0 || options.Temperature > 1)
+            {
+                throw new ArgumentOutOfRangeException(nameof(options.Temperature), "Temperature must be in the range 0..1.");
+            }
+            if (options.TemperatureIncrement < 0 || options.TemperatureIncrement > 1)
+            {
+                throw new ArgumentOutOfRangeException(nameof(options.TemperatureIncrement), "Temperature increment must be in the range 0..1.");
+            }
+            if (options.GlitchThreshold <= 0 || options.GlitchThreshold > 1)
+            {
+                throw new ArgumentOutOfRangeException(nameof(options.GlitchThreshold), "Glitch threshold must be in the range (0, 1].");
+            }
+            if (options.MaxRecoveryDepth < 0 || options.MaxRecoveryDepth > 6)
+            {
+                throw new ArgumentOutOfRangeException(nameof(options.MaxRecoveryDepth), "Recovery depth must be in the range 0..6.");
+            }
+            if (options.MinRecoverySplitSeconds < 5 || options.MinRecoverySplitSeconds >= options.ChunkSeconds / 2)
+            {
+                throw new ArgumentOutOfRangeException(nameof(options.MinRecoverySplitSeconds),
+                    "Minimum recovery split must be at least 5 seconds and less than half the target chunk duration.");
+            }
+            if (options.VadThreshold <= 0 || options.VadThreshold >= 1)
+            {
+                throw new ArgumentOutOfRangeException(nameof(options.VadThreshold), "VAD threshold must be in the range (0, 1).");
+            }
+            if (options.VadMinSpeechMs < 0 || options.VadMinSilenceMs < 0 ||
+                options.VadSpeechPaddingMs < 0 || options.VadEdgePaddingMs < 0)
+            {
+                throw new ArgumentOutOfRangeException(nameof(options.UseVad), "VAD durations/padding must be non-negative.");
+            }
+            if (string.IsNullOrWhiteSpace(options.Language))
+            {
+                throw new ArgumentException("Language cannot be empty. Use 'auto' for automatic detection.", nameof(options.Language));
+            }
+        }
+
+        private static WhisperProcessor CreateMicrophoneProcessor(
+            WhisperFactory factory,
+            AppOptions options,
+            Serilog.ILogger logger)
+        {
+            logger.Information("Creating WhisperProcessor for microphone mode: {model}", options.Model);
+            var builder = factory.CreateBuilder()
+                .WithLanguage(options.Language)
+                .WithMaxLastTextTokens(options.MaxContextTokens)
+                .WithEntropyThreshold(options.EntropyThreshold)
+                .WithTemperature(options.Temperature)
+                .WithTemperatureInc(options.TemperatureIncrement);
+            return builder.Build();
         }
 
         private static bool CheckCancellation(ConsoleKey stopKey)
         {
-            if (Console.KeyAvailable)
+            if (!Console.KeyAvailable)
             {
-                ConsoleKey key = Console.ReadKey(true).Key;
-                return key == stopKey;
+                return false;
             }
-            return false;
+
+            ConsoleKey key = Console.ReadKey(true).Key;
+            return key == stopKey;
         }
 
         private static void OpenFile(FileInfo fileInfo)
         {
-
-            if (fileInfo.Exists)
-            {
-                try
-                {
-                    Process.Start(new ProcessStartInfo
-                    {
-                        FileName = fileInfo.FullName,
-                        UseShellExecute = true
-                    });
-                }
-                catch (Exception ex)
-                {
-                    Log.Logger.Error(ex, "Failed to open file: {filePath}", fileInfo.FullName);
-                }
-            }
-            else
-            {
-                Log.Logger.Error("File does not exist: {filePath}", fileInfo.FullName);
-            }
-        }
-
-        private static async Task<FileInfo> GetWhisperModelPathAsync(GgmlType model, Logger logger, CancellationToken token)
-        {
-            string modelName = $"ggml-{model.ToString().ToLower()}.bin";
-            string tempPath = Path.GetTempPath();
-            string workingDirectory = Path.Combine(tempPath, "WhisperCLI", "Models");
-            var di = Directory.CreateDirectory(workingDirectory);
-
-            string filePath = Path.Combine(di.FullName, modelName);
-            FileInfo fileInfo = new(filePath);
             if (!fileInfo.Exists)
             {
-                using var modelStream = await WhisperGgmlDownloader.Default.GetGgmlModelAsync(model, cancellationToken: token);
-                logger.Information("Downloading model: {_ggmlType}", model);
-                using var fileWriter = fileInfo.Create();
-                await modelStream.CopyToAsync(fileWriter, token);
-                logger.Information("Model downloaded: {filePath}", fileInfo.FullName);
+                Log.Logger.Error("File does not exist: {filePath}", fileInfo.FullName);
+                return;
             }
-            else
-            {
-                logger.Information("Model already exists: {filePath}", fileInfo.FullName);
-            }
-            return fileInfo;
-        }
 
-        private static WhisperProcessor CreateProcessor(GgmlType model, FileInfo whisperModelInfo, Logger logger)
-        {
-            logger.Information("Creating WhisperProcessor...");
             try
             {
-                WhisperFactory whisperFactory = WhisperFactory.FromPath(whisperModelInfo.FullName);
-                logger.Information("WhisperProcessor created: {model}", model);
-                return whisperFactory
-                    .CreateBuilder()
-                    .WithLanguage("auto")
-                    .Build();
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = fileInfo.FullName,
+                    UseShellExecute = true
+                });
             }
             catch (Exception ex)
             {
-                logger.Error(ex, "Error occurred while creating WhisperProcessor");
-                Environment.Exit(-1);
-                throw;
+                Log.Logger.Error(ex, "Failed to open file: {filePath}", fileInfo.FullName);
+            }
+        }
+
+        private static async Task<FileInfo> GetWhisperModelPathAsync(
+            GgmlType model,
+            Serilog.ILogger logger,
+            CancellationToken token)
+        {
+            string modelName = $"ggml-{model.ToString().ToLowerInvariant()}.bin";
+            string modelDirectory = Path.Combine(Path.GetTempPath(), "WhisperCLI", "Models");
+            Directory.CreateDirectory(modelDirectory);
+
+            string filePath = Path.Combine(modelDirectory, modelName);
+            FileInfo fileInfo = new(filePath);
+
+            // All supported Whisper models are far larger than this. A tiny file is almost
+            // certainly a previously interrupted/non-atomic download.
+            if (fileInfo.Exists && fileInfo.Length < 1024 * 1024)
+            {
+                logger.Warning("Existing model file looks incomplete and will be re-downloaded: {filePath}", filePath);
+                fileInfo.Delete();
+                fileInfo.Refresh();
+            }
+
+            if (fileInfo.Exists)
+            {
+                logger.Information("Model already exists: {filePath}", fileInfo.FullName);
+                return fileInfo;
+            }
+
+            string tempPath = filePath + $".{Guid.NewGuid():N}.download";
+            try
+            {
+                logger.Information("Downloading model: {model}", model);
+                using Stream modelStream = await WhisperGgmlDownloader.Default.GetGgmlModelAsync(model, cancellationToken: token);
+                await using (FileStream fileWriter = new(tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                {
+                    await modelStream.CopyToAsync(fileWriter, token);
+                    await fileWriter.FlushAsync(token);
+                }
+                File.Move(tempPath, filePath, overwrite: true);
+                logger.Information("Model downloaded: {filePath}", filePath);
+                return new FileInfo(filePath);
+            }
+            finally
+            {
+                TryDelete(tempPath);
+            }
+        }
+
+        private static async Task DelayBeforeExitAsync(int delaySeconds, CancellationToken token)
+        {
+            if (delaySeconds <= 0 || token.IsCancellationRequested)
+            {
+                return;
+            }
+            await Task.Delay(TimeSpan.FromSeconds(delaySeconds), token);
+        }
+
+        private static void TryDelete(string path)
+        {
+            try
+            {
+                if (File.Exists(path))
+                {
+                    File.Delete(path);
+                }
+            }
+            catch
+            {
+                // Best-effort cleanup only.
+            }
+        }
+
+        private sealed class SingleInstanceLock : IDisposable
+        {
+            private readonly FileStream _stream;
+            private readonly string _path;
+
+            private SingleInstanceLock(FileStream stream, string path)
+            {
+                _stream = stream;
+                _path = path;
+            }
+
+            public static SingleInstanceLock? TryAcquire(Serilog.ILogger logger)
+            {
+                string workingDirectory = Path.Combine(Path.GetTempPath(), "WhisperCLI");
+                Directory.CreateDirectory(workingDirectory);
+                string path = Path.Combine(workingDirectory, "whisper.lock");
+
+                try
+                {
+                    FileStream stream = new(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+                    stream.SetLength(0);
+                    using (StreamWriter writer = new(stream, Encoding.UTF8, bufferSize: 256, leaveOpen: true))
+                    {
+                        writer.Write($"pid={Environment.ProcessId}; startedUtc={DateTime.UtcNow:O}");
+                        writer.Flush();
+                    }
+                    stream.Position = 0;
+                    logger.Debug("Single-instance lock acquired: {lockFilePath}", path);
+                    return new SingleInstanceLock(stream, path);
+                }
+                catch (IOException)
+                {
+                    return null;
+                }
+            }
+
+            public void Dispose()
+            {
+                _stream.Dispose();
+                TryDelete(_path);
             }
         }
     }
