@@ -1,4 +1,4 @@
-﻿using Whisper.net;
+using Whisper.net;
 
 namespace WhisperCLI.Transcribers
 {

@@ -21,7 +21,7 @@ namespace WhisperCLI
         public string FallbackModels { get; set; } = "auto";
 
         [Option("runtime", Required = false, Default = "auto",
-            HelpText = "Whisper native runtime: auto, gpu, cuda, cuda12, or cpu. In auto mode an NVIDIA GPU detected by nvidia-smi is required to use CUDA instead of silently falling back to CPU.")]
+            HelpText = "Whisper native runtime: auto, gpu, cuda, cuda12, or cpu. This build intentionally uses Whisper.net 1.8.1 to preserve the CUDA 12.1+ runtime that worked in the original application. cuda12 is an alias for cuda.")]
         public string Runtime { get; set; } = "auto";
 
         [Option("gpu-device", Required = false, Default = 0,
@@ -29,7 +29,7 @@ namespace WhisperCLI
         public int GpuDevice { get; set; } = 0;
 
         [Option("use-vad", Required = false, Default = true,
-            HelpText = "Use Silero VAD to place chunk boundaries at speech/silence transitions. Specify '--use-vad false' to disable. Default: true.")]
+            HelpText = "Use the managed energy/silence detector to place coarse chunk boundaries at pauses. It is used only as a boundary hint; audio is never dropped because of it. Specify '--use-vad false' to disable. Default: true.")]
         public bool? UseVadOption { get; set; } = true;
         public bool UseVad => UseVadOption ?? true;
 
@@ -38,7 +38,7 @@ namespace WhisperCLI
         public int ChunkSeconds { get; set; } = 75;
 
         [Option("max-chunk-seconds", Required = false, Default = 90,
-            HelpText = "Maximum VAD speech region/chunk duration in seconds before forcing a boundary. Default: 90.")]
+            HelpText = "Maximum chunk duration in seconds before forcing a boundary. Default: 90.")]
         public int MaxChunkSeconds { get; set; } = 90;
 
         [Option("max-context-tokens", Required = false, Default = 64,
@@ -80,23 +80,23 @@ namespace WhisperCLI
         public bool LockDetectedLanguage => LockDetectedLanguageOption ?? true;
 
         [Option("vad-threshold", Required = false, Default = 0.5f,
-            HelpText = "Silero VAD speech probability threshold. Default: 0.5.")]
+            HelpText = "Managed silence detector sensitivity in the range 0..1. Higher values require more energy above the estimated noise floor. Default: 0.5.")]
         public float VadThreshold { get; set; } = 0.5f;
 
         [Option("vad-min-speech-ms", Required = false, Default = 250,
-            HelpText = "Minimum VAD speech duration in milliseconds. Default: 250.")]
+            HelpText = "Minimum detected active-audio duration in milliseconds. Default: 250.")]
         public int VadMinSpeechMs { get; set; } = 250;
 
         [Option("vad-min-silence-ms", Required = false, Default = 700,
-            HelpText = "Minimum VAD silence used to close a speech region, in milliseconds. Default: 700.")]
+            HelpText = "Minimum quiet gap used to close an active-audio region, in milliseconds. Default: 700.")]
         public int VadMinSilenceMs { get; set; } = 700;
 
         [Option("vad-speech-padding-ms", Required = false, Default = 250,
-            HelpText = "Padding applied by Silero around detected speech, in milliseconds. Default: 250.")]
+            HelpText = "Padding applied around detected active-audio regions, in milliseconds. Default: 250.")]
         public int VadSpeechPaddingMs { get; set; } = 250;
 
         [Option("vad-edge-padding-ms", Required = false, Default = 150,
-            HelpText = "Additional chunk-edge padding around VAD regions, in milliseconds. Default: 150.")]
+            HelpText = "Safety margin kept away from detected activity when choosing a chunk boundary, in milliseconds. Default: 150.")]
         public int VadEdgePaddingMs { get; set; } = 150;
 
         [Option('i', "microphone-index", Required = false, Default = 0,

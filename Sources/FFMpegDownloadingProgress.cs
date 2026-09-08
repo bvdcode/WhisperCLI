@@ -1,4 +1,4 @@
-﻿using Serilog;
+using Serilog;
 using Xabe.FFmpeg;
 
 namespace WhisperCLI

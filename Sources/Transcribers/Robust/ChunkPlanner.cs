@@ -1,5 +1,3 @@
-using Whisper.net;
-
 namespace WhisperCLI.Transcribers.Robust;
 
 public static class ChunkPlanner
@@ -12,7 +10,7 @@ public static class ChunkPlanner
     /// the caller can skip Whisper for them without losing timeline diagnostics.
     /// </summary>
     public static List<AudioChunk> FromVad(
-        IReadOnlyList<VadSegmentData> speechRegions,
+        IReadOnlyList<SpeechRegion> speechRegions,
         TimeSpan audioDuration,
         TimeSpan targetDuration,
         TimeSpan maxDuration,
@@ -129,7 +127,7 @@ public static class ChunkPlanner
 
     public static TimeSpan FindRecoverySplitPoint(
         AudioChunk chunk,
-        IReadOnlyList<VadSegmentData> speechRegions,
+        IReadOnlyList<SpeechRegion> speechRegions,
         TimeSpan minChildDuration)
     {
         TimeSpan midpoint = chunk.Start + TimeSpan.FromTicks(chunk.Duration.Ticks / 2);
@@ -146,8 +144,8 @@ public static class ChunkPlanner
 
         for (int i = 0; i < speechRegions.Count - 1; i++)
         {
-            VadSegmentData left = speechRegions[i];
-            VadSegmentData right = speechRegions[i + 1];
+            SpeechRegion left = speechRegions[i];
+            SpeechRegion right = speechRegions[i + 1];
             if (left.End <= chunk.Start || right.Start >= chunk.End)
             {
                 continue;
@@ -177,7 +175,7 @@ public static class ChunkPlanner
     }
 
     private static TimeSpan? FindBestSilenceBoundary(
-        IReadOnlyList<VadSegmentData> regions,
+        IReadOnlyList<SpeechRegion> regions,
         TimeSpan earliest,
         TimeSpan desired,
         TimeSpan latest,
@@ -216,9 +214,9 @@ public static class ChunkPlanner
         return best;
     }
 
-    private static bool ContainsSpeech(IReadOnlyList<VadSegmentData> regions, TimeSpan start, TimeSpan end)
+    private static bool ContainsSpeech(IReadOnlyList<SpeechRegion> regions, TimeSpan start, TimeSpan end)
     {
-        foreach (VadSegmentData region in regions)
+        foreach (SpeechRegion region in regions)
         {
             if (region.End <= start)
             {

@@ -87,7 +87,7 @@ namespace WhisperCLI
                 FileInfo result;
                 string osType = Environment.OSVersion.Platform.ToString();
                 logger.Information("Operating System: {osType}", osType);
-                logger.Information("WhisperCLI robust build: v4-gpu-runtime");
+                logger.Information("WhisperCLI robust build: v6-vulkan-gpu-compatible");
 
                 WhisperRuntimeManager.Configure(options, logger);
 
@@ -95,9 +95,8 @@ namespace WhisperCLI
                 {
                     // Microphone recordings are short and keep the lightweight path.
                     FileInfo whisperModelInfo = await GetWhisperModelPathAsync(options.Model, logger, cts.Token);
-                    using WhisperFactory microphoneFactory = WhisperFactory.FromPath(
-                        whisperModelInfo.FullName,
-                        WhisperRuntimeManager.CreateFactoryOptions(options));
+                    using WhisperFactory microphoneFactory = WhisperRuntimeManager.CreateFactory(
+                        whisperModelInfo.FullName, options);
                     WhisperRuntimeManager.ValidateLoadedRuntime(logger);
                     await using WhisperProcessor processor = CreateMicrophoneProcessor(microphoneFactory, options, logger);
 
@@ -128,7 +127,7 @@ namespace WhisperCLI
                     }
 
                     logger.Information(
-                        "Robust long-file mode: primary={primary}, fallbacks={fallbacks}, language={language}, VAD={vad}, chunk={chunk}s, runtime={runtime}",
+                        "Robust long-file mode: primary={primary}, fallbacks={fallbacks}, language={language}, boundaryDetector={vad}, chunk={chunk}s, runtime={runtime}",
                         options.Model, options.FallbackModels, options.Language, options.UseVad, options.ChunkSeconds, options.Runtime);
 
                     var transcriber = new FileTranscriber(
@@ -186,9 +185,13 @@ namespace WhisperCLI
             ArgumentOutOfRangeException.ThrowIfNegative(options.GpuDevice, nameof(options.GpuDevice));
 
             string runtime = (options.Runtime ?? string.Empty).Trim().ToLowerInvariant();
-            if (runtime is not ("auto" or "gpu" or "nvidia" or "cuda" or "cuda13" or "cuda12" or "cpu"))
+            if (runtime is not ("auto" or "gpu" or "nvidia" or "cuda" or "cuda12" or "cpu" or "cuda13"))
             {
                 throw new ArgumentException("Runtime must be one of: auto, gpu, cuda, cuda12, cpu.", nameof(options.Runtime));
+            }
+            if (runtime == "cuda13")
+            {
+                throw new ArgumentException("This compatibility build restores Whisper.net 1.8.1 (CUDA 12.x). Use auto/cuda, not cuda13.", nameof(options.Runtime));
             }
 
             if (options.ChunkSeconds < 20)

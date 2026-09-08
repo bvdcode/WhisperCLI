@@ -1,4 +1,4 @@
-﻿using Serilog;
+using Serilog;
 using NAudio.Wave;
 using Whisper.net;
 using System.Text;

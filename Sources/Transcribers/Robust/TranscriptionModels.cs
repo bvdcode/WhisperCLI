@@ -1,5 +1,11 @@
 namespace WhisperCLI.Transcribers.Robust;
 
+public sealed class SpeechRegion
+{
+    public TimeSpan Start { get; set; }
+    public TimeSpan End { get; set; }
+}
+
 public sealed class AudioChunk
 {
     public string Id { get; set; } = string.Empty;

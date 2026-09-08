@@ -79,15 +79,22 @@ namespace WhisperCLI.Transcribers
                 TimeSpan audioDuration = WaveChunkReader.GetDuration(normalized.FullName);
                 _logger.Information("Normalized audio duration: {duration}", FormatClock(audioDuration));
 
-                List<VadSegmentData> speechRegions = [];
+                List<SpeechRegion> speechRegions = [];
                 bool usedVad = false;
                 if (options.UseVad)
                 {
                     try
                     {
-                        speechRegions = await DetectSpeechRegionsAsync(normalized, options, token);
-                        usedVad = true;
-                        _logger.Information("Silero VAD detected {count} speech regions", speechRegions.Count);
+                        speechRegions = DetectSpeechRegions(normalized, options, token);
+                        usedVad = speechRegions.Count > 0;
+                        if (usedVad)
+                        {
+                            _logger.Information("Managed silence detector found {count} active-audio regions for chunk-boundary hints", speechRegions.Count);
+                        }
+                        else
+                        {
+                            _logger.Warning("Managed silence detector found no reliable activity regions; using fixed-duration chunks so no audio can be skipped");
+                        }
                     }
                     catch (OperationCanceledException)
                     {
@@ -95,7 +102,7 @@ namespace WhisperCLI.Transcribers
                     }
                     catch (Exception ex)
                     {
-                        _logger.Warning(ex, "Silero VAD failed; falling back to fixed-duration chunking");
+                        _logger.Warning(ex, "Managed silence detector failed; falling back to fixed-duration chunking");
                     }
                 }
 
@@ -116,15 +123,8 @@ namespace WhisperCLI.Transcribers
                     chunks = ChunkPlanner.Fixed(audioDuration, targetChunk);
                 }
 
-                if (usedVad && chunks.Count == 0)
-                {
-                    _logger.Warning("VAD found no speech in the recording. Producing an empty transcript rather than hallucinating over silence.");
-                }
-                else
-                {
-                    _logger.Information("Prepared {count} independent transcription chunks (target {target}s, hard max {max}s)",
-                        chunks.Count, options.ChunkSeconds, options.MaxChunkSeconds);
-                }
+                _logger.Information("Prepared {count} independent transcription chunks (target {target}s, hard max {max}s)",
+                    chunks.Count, options.ChunkSeconds, options.MaxChunkSeconds);
 
                 List<GgmlType> fallbackModels = ResolveFallbackModels(options.Model, options.FallbackModels);
                 string fingerprint = BuildFingerprint(options, fallbackModels, usedVad);
@@ -132,6 +132,19 @@ namespace WhisperCLI.Transcribers
                 TranscriptionCheckpoint checkpoint = options.Resume
                     ? await LoadCheckpointAsync(checkpointPath, inputFile, fingerprint, token)
                     : NewCheckpoint(inputFile, fingerprint);
+
+                if (options.Resume && checkpoint.CompletedChunks.Count > 0)
+                {
+                    (List<AudioChunk> ResumedPlan, TimeSpan PreservedUntil) resume = PreserveCheckpointPrefix(
+                        chunks, checkpoint.CompletedChunks, audioDuration, speechRegions);
+                    chunks = resume.ResumedPlan;
+                    if (resume.PreservedUntil > TimeSpan.Zero)
+                    {
+                        _logger.Information(
+                            "Preserved completed checkpoint prefix through {resumeAt}; only the remaining audio was replanned",
+                            FormatClock(resume.PreservedUntil));
+                    }
+                }
 
                 string partialTextPath = BuildSidecarPath(inputFile, ".partial.txt");
                 string partialSrtPath = BuildSidecarPath(inputFile, ".partial.srt");
@@ -145,9 +158,8 @@ namespace WhisperCLI.Transcribers
                     await WriteProgressOutputsAsync(inputFile, checkpoint.CompletedChunks, chunks.Count, CancellationToken.None);
                 }
 
-                // VAD uses the same native Whisper runtime and can be the first operation that
-                // causes Whisper.net to select CUDA vs CPU. Validate only after restoring any
-                // previous checkpoint so already-completed work remains immediately readable.
+                // The managed boundary detector does not load Whisper. At this point the runtime may
+                // still be unloaded; ValidateLoadedRuntime becomes authoritative after the first model factory is created.
                 WhisperRuntimeManager.ValidateLoadedRuntime(_logger);
 
                 string? lockedLanguage = null;
@@ -254,18 +266,11 @@ namespace WhisperCLI.Transcribers
             int depth,
             AppOptions options,
             IReadOnlyList<GgmlType> fallbackModels,
-            IReadOnlyList<VadSegmentData> speechRegions,
+            IReadOnlyList<SpeechRegion> speechRegions,
             ModelFactoryCache factories,
             string? lockedLanguage,
             CancellationToken token)
         {
-            if (speechRegions.Count > 0 && !chunk.ExpectedSpeech)
-            {
-                _logger.Debug("Chunk {chunkId} {start}-{end}: VAD indicates silence; skipping Whisper",
-                    chunk.Id, FormatClock(chunk.Start), FormatClock(chunk.End));
-                return CreateVadSilenceResult(chunk);
-            }
-
             List<AttemptDiagnostic> diagnostics = [];
             AttemptCandidate? best = null;
 
@@ -482,6 +487,13 @@ namespace WhisperCLI.Transcribers
             {
                 throw;
             }
+            catch (WhisperRuntimeUnavailableException)
+            {
+                // Runtime/backend selection is an infrastructure failure, not a bad transcript.
+                // Retrying models, shifting boundaries, or recursively splitting audio cannot fix it,
+                // so abort the run immediately instead of creating a retry storm.
+                throw;
+            }
             catch (Exception ex)
             {
                 sw.Stop();
@@ -497,59 +509,189 @@ namespace WhisperCLI.Transcribers
             }
         }
 
-        private async Task<List<VadSegmentData>> DetectSpeechRegionsAsync(FileInfo normalizedWav, AppOptions options, CancellationToken token)
+        private List<SpeechRegion> DetectSpeechRegions(FileInfo normalizedWav, AppOptions options, CancellationToken token)
         {
-            string vadModelPath = await GetVadModelPathAsync(token);
-            using WhisperVadFactory vadFactory = WhisperVadFactory.FromPath(vadModelPath);
-            await using WhisperVadProcessor vadProcessor = vadFactory.CreateBuilder()
-                .WithThreshold(options.VadThreshold)
-                .WithMinSpeechDuration(TimeSpan.FromMilliseconds(options.VadMinSpeechMs))
-                .WithMinSilenceDuration(TimeSpan.FromMilliseconds(options.VadMinSilenceMs))
-                .WithMaxSpeechDuration(TimeSpan.FromSeconds(options.MaxChunkSeconds))
-                .WithSpeechPadding(TimeSpan.FromMilliseconds(options.VadSpeechPaddingMs))
-                .Build();
-
-            await using FileStream stream = normalizedWav.OpenRead();
-            IReadOnlyList<VadSegmentData> regions = await vadProcessor.DetectSpeechAsync(stream, token);
-            return regions.ToList();
-        }
-
-        private async Task<string> GetVadModelPathAsync(CancellationToken token)
-        {
-            string modelDirectory = Path.Combine(Path.GetTempPath(), "WhisperCLI", "Models");
-            Directory.CreateDirectory(modelDirectory);
-            string path = Path.Combine(modelDirectory, "ggml-silero-v6.2.0.bin");
-            if (File.Exists(path))
+            // Whisper.net 1.9.1 introduced Silero VAD, but the original application used
+            // Whisper.net 1.8.1 and its CUDA 12.x runtime successfully on this machine.
+            // Keep that known-good GPU runtime and use a small managed detector only to find
+            // quiet gaps for chunk boundaries. IMPORTANT: the detector never decides which
+            // audio gets transcribed; every chunk is still sent to Whisper.
+            using var reader = new WaveFileReader(normalizedWav.FullName);
+            WaveFormat format = reader.WaveFormat;
+            if (format.Encoding != WaveFormatEncoding.Pcm || format.BitsPerSample != 16 || format.Channels != 1)
             {
-                var existing = new FileInfo(path);
-                if (existing.Length >= 800_000)
+                throw new InvalidDataException(
+                    $"Managed boundary detector expects mono PCM16 WAV; got {format.Encoding}, {format.BitsPerSample}-bit, {format.Channels} channel(s).");
+            }
+
+            const int frameMs = 30;
+            int samplesPerFrame = Math.Max(1, format.SampleRate * frameMs / 1000);
+            int bytesPerFrame = samplesPerFrame * 2;
+            byte[] buffer = new byte[bytesPerFrame];
+            List<EnergyFrame> frames = [];
+            long sampleCursor = 0;
+
+            while (true)
+            {
+                token.ThrowIfCancellationRequested();
+                int read = 0;
+                while (read < buffer.Length)
                 {
-                    return path;
+                    int n = reader.Read(buffer, read, buffer.Length - read);
+                    if (n <= 0)
+                    {
+                        break;
+                    }
+                    read += n;
                 }
 
-                _logger.Warning("Existing Silero VAD model looks incomplete and will be re-downloaded: {path}", path);
-                TryDelete(path);
+                if (read < 2)
+                {
+                    break;
+                }
+
+                int sampleCount = read / 2;
+                double sumSquares = 0;
+                for (int i = 0; i < sampleCount * 2; i += 2)
+                {
+                    short sample = (short)(buffer[i] | (buffer[i + 1] << 8));
+                    double normalized = sample / 32768.0;
+                    sumSquares += normalized * normalized;
+                }
+
+                double rms = Math.Sqrt(sumSquares / sampleCount);
+                double dbfs = 20.0 * Math.Log10(Math.Max(rms, 1e-9));
+                TimeSpan start = TimeSpan.FromSeconds((double)sampleCursor / format.SampleRate);
+                sampleCursor += sampleCount;
+                TimeSpan end = TimeSpan.FromSeconds((double)sampleCursor / format.SampleRate);
+                frames.Add(new EnergyFrame(start, end, dbfs));
+
+                if (read < buffer.Length)
+                {
+                    break;
+                }
             }
 
-            _logger.Information("Downloading Silero VAD model...");
-            string tempPath = path + $".{Guid.NewGuid():N}.download";
-            try
+            if (frames.Count == 0)
             {
-                using Stream modelStream = await WhisperGgmlDownloader.Default.GetGgmlSileroVadModelAsync();
-                await using (FileStream writer = new(tempPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                return [];
+            }
+
+            double[] sortedDb = frames.Select(f => f.Dbfs).OrderBy(v => v).ToArray();
+            double noiseFloor = Percentile(sortedDb, 0.20);
+            double activeLevel = Percentile(sortedDb, 0.90);
+            double dynamicRange = Math.Max(0, activeLevel - noiseFloor);
+
+            // --vad-threshold remains a 0..1 sensitivity knob for CLI compatibility.
+            // At the default 0.5, activity needs roughly 8 dB above the estimated floor.
+            // This detector is intentionally conservative because it is only choosing gaps.
+            double sensitivity = Math.Clamp(options.VadThreshold, 0.01f, 0.99f);
+            double marginDb = 4.0 + 8.0 * sensitivity;
+            marginDb = Math.Min(marginDb, Math.Max(4.0, dynamicRange * 0.45));
+            double thresholdDb = Math.Clamp(noiseFloor + marginDb, -60.0, -20.0);
+            if (activeLevel - thresholdDb < 3.0)
+            {
+                thresholdDb = activeLevel - 3.0;
+            }
+
+            _logger.Debug(
+                "Managed boundary detector levels: noise={noise:F1} dBFS, active={active:F1} dBFS, threshold={threshold:F1} dBFS",
+                noiseFloor, activeLevel, thresholdDb);
+
+            TimeSpan minSpeech = TimeSpan.FromMilliseconds(options.VadMinSpeechMs);
+            TimeSpan minSilence = TimeSpan.FromMilliseconds(options.VadMinSilenceMs);
+            TimeSpan padding = TimeSpan.FromMilliseconds(options.VadSpeechPaddingMs);
+
+            List<SpeechRegion> rawRegions = [];
+            TimeSpan? regionStart = null;
+            TimeSpan? quietStart = null;
+            TimeSpan lastEnd = TimeSpan.Zero;
+
+            foreach (EnergyFrame frame in frames)
+            {
+                token.ThrowIfCancellationRequested();
+                lastEnd = frame.End;
+                bool active = frame.Dbfs >= thresholdDb;
+
+                if (active)
                 {
-                    await modelStream.CopyToAsync(writer, token);
-                    await writer.FlushAsync(token);
+                    regionStart ??= frame.Start;
+                    quietStart = null;
+                    continue;
                 }
-                File.Move(tempPath, path, overwrite: true);
-                _logger.Information("Silero VAD model downloaded: {path}", path);
-                return path;
+
+                if (regionStart is null)
+                {
+                    continue;
+                }
+
+                quietStart ??= frame.Start;
+                if (frame.End - quietStart.Value >= minSilence)
+                {
+                    TimeSpan regionEnd = quietStart.Value;
+                    if (regionEnd - regionStart.Value >= minSpeech)
+                    {
+                        rawRegions.Add(new SpeechRegion { Start = regionStart.Value, End = regionEnd });
+                    }
+                    regionStart = null;
+                    quietStart = null;
+                }
             }
-            finally
+
+            if (regionStart is not null)
             {
-                TryDelete(tempPath);
+                TimeSpan regionEnd = quietStart ?? lastEnd;
+                if (regionEnd - regionStart.Value >= minSpeech)
+                {
+                    rawRegions.Add(new SpeechRegion { Start = regionStart.Value, End = regionEnd });
+                }
             }
+
+            if (rawRegions.Count == 0)
+            {
+                return [];
+            }
+
+            // Pad and merge. Max speech duration is deliberately NOT enforced here; ChunkPlanner
+            // already imposes the hard chunk maximum independently of these activity regions.
+            TimeSpan total = reader.TotalTime;
+            List<SpeechRegion> padded = [];
+            foreach (SpeechRegion region in rawRegions)
+            {
+                TimeSpan start = Max(TimeSpan.Zero, region.Start - padding);
+                TimeSpan end = Min(total, region.End + padding);
+                if (padded.Count > 0 && start <= padded[^1].End)
+                {
+                    padded[^1].End = Max(padded[^1].End, end);
+                }
+                else
+                {
+                    padded.Add(new SpeechRegion { Start = start, End = end });
+                }
+            }
+
+            return padded;
         }
+
+        private static double Percentile(double[] sorted, double percentile)
+        {
+            if (sorted.Length == 0)
+            {
+                return -120.0;
+            }
+
+            double position = Math.Clamp(percentile, 0, 1) * (sorted.Length - 1);
+            int lower = (int)Math.Floor(position);
+            int upper = (int)Math.Ceiling(position);
+            if (lower == upper)
+            {
+                return sorted[lower];
+            }
+            double fraction = position - lower;
+            return sorted[lower] + (sorted[upper] - sorted[lower]) * fraction;
+        }
+
+        private readonly record struct EnergyFrame(TimeSpan Start, TimeSpan End, double Dbfs);
 
         private async Task WriteProgressOutputsAsync(
             FileInfo inputFile,
@@ -659,7 +801,7 @@ namespace WhisperCLI.Transcribers
             sb.AppendLine($"Fallback models: {string.Join(", ", report.FallbackModels)}");
             sb.AppendLine($"Requested language: {report.RequestedLanguage}");
             sb.AppendLine($"Locked detected language: {report.LockedDetectedLanguage ?? "<none>"}");
-            sb.AppendLine($"VAD: {(report.UsedVad ? "Silero" : "fixed chunks")}, regions={report.VadSpeechRegionCount}");
+            sb.AppendLine($"Boundary detection: {(report.UsedVad ? "managed energy/silence" : "fixed chunks")}, activity regions={report.VadSpeechRegionCount}");
             sb.AppendLine($"Needs review: {report.NeedsReview}");
             sb.AppendLine();
 
@@ -914,7 +1056,7 @@ namespace WhisperCLI.Transcribers
 
         private static void EnsureExecutable(string path)
         {
-            if (!File.Exists(path))
+            if (OperatingSystem.IsWindows() || !File.Exists(path))
             {
                 return;
             }
@@ -1043,6 +1185,101 @@ namespace WhisperCLI.Transcribers
                    Math.Abs((a.End - b.End).TotalMilliseconds) < 5;
         }
 
+        private static (List<AudioChunk> ResumedPlan, TimeSpan PreservedUntil) PreserveCheckpointPrefix(
+            IReadOnlyList<AudioChunk> planned,
+            IReadOnlyList<ChunkTranscriptionResult> completed,
+            TimeSpan audioDuration,
+            IReadOnlyList<SpeechRegion> speechRegions)
+        {
+            const double toleranceMs = 5;
+            TimeSpan cursor = TimeSpan.Zero;
+            List<AudioChunk> prefix = [];
+
+            foreach (ChunkTranscriptionResult result in completed.OrderBy(c => c.Chunk.Start))
+            {
+                AudioChunk chunk = result.Chunk;
+                if (Math.Abs((chunk.Start - cursor).TotalMilliseconds) > toleranceMs || chunk.End <= chunk.Start)
+                {
+                    break;
+                }
+
+                prefix.Add(new AudioChunk
+                {
+                    Id = string.Empty,
+                    Start = chunk.Start,
+                    End = chunk.End,
+                    ExpectedSpeech = chunk.ExpectedSpeech
+                });
+                cursor = chunk.End;
+            }
+
+            if (prefix.Count == 0)
+            {
+                List<AudioChunk> unchanged = planned.Select(CloneChunk).ToList();
+                for (int i = 0; i < unchanged.Count; i++) unchanged[i].Id = (i + 1).ToString("D4");
+                return (unchanged, TimeSpan.Zero);
+            }
+
+            if (cursor >= audioDuration)
+            {
+                for (int i = 0; i < prefix.Count; i++) prefix[i].Id = (i + 1).ToString("D4");
+                return (prefix, cursor);
+            }
+
+            // Keep the old completed boundaries exactly, then use the new planner only for
+            // future audio. Ignore a planned boundary that would create a tiny first suffix.
+            List<AudioChunk> resultPlan = prefix;
+            TimeSpan suffixStart = cursor;
+            TimeSpan minimumUseful = TimeSpan.FromSeconds(20);
+
+            foreach (TimeSpan end in planned
+                         .Select(c => c.End)
+                         .Where(end => end > suffixStart)
+                         .Distinct()
+                         .OrderBy(end => end))
+            {
+                if (end < audioDuration && end - suffixStart < minimumUseful)
+                {
+                    continue;
+                }
+
+                resultPlan.Add(new AudioChunk
+                {
+                    Id = string.Empty,
+                    Start = suffixStart,
+                    End = end,
+                    ExpectedSpeech = speechRegions.Count > 0 && HasSpeechOverlap(speechRegions, suffixStart, end)
+                });
+                suffixStart = end;
+            }
+
+            if (suffixStart < audioDuration)
+            {
+                resultPlan.Add(new AudioChunk
+                {
+                    Id = string.Empty,
+                    Start = suffixStart,
+                    End = audioDuration,
+                    ExpectedSpeech = speechRegions.Count > 0 && HasSpeechOverlap(speechRegions, suffixStart, audioDuration)
+                });
+            }
+
+            for (int i = 0; i < resultPlan.Count; i++)
+            {
+                resultPlan[i].Id = (i + 1).ToString("D4");
+            }
+
+            return (resultPlan, cursor);
+        }
+
+        private static AudioChunk CloneChunk(AudioChunk chunk) => new()
+        {
+            Id = chunk.Id,
+            Start = chunk.Start,
+            End = chunk.End,
+            ExpectedSpeech = chunk.ExpectedSpeech
+        };
+
         private static string? DetectLanguageFromCompletedChunks(IEnumerable<ChunkTranscriptionResult> results)
         {
             foreach (ChunkTranscriptionResult result in results.OrderBy(r => r.Chunk.Start))
@@ -1082,9 +1319,9 @@ namespace WhisperCLI.Transcribers
             return midpoint >= coverage.Start && (midpoint < coverage.End || (isLast && midpoint <= coverage.End));
         }
 
-        private static bool HasSpeechOverlap(IReadOnlyList<VadSegmentData> speechRegions, TimeSpan start, TimeSpan end)
+        private static bool HasSpeechOverlap(IReadOnlyList<SpeechRegion> speechRegions, TimeSpan start, TimeSpan end)
         {
-            foreach (VadSegmentData region in speechRegions)
+            foreach (SpeechRegion region in speechRegions)
             {
                 if (region.End <= start)
                 {
@@ -1098,22 +1335,6 @@ namespace WhisperCLI.Transcribers
             }
             return false;
         }
-
-        private static ChunkTranscriptionResult CreateVadSilenceResult(AudioChunk chunk) => new()
-        {
-            Chunk = chunk,
-            SelectedModel = "none",
-            SelectedStrategy = "vad-silence-skip",
-            NeedsReview = false,
-            Quality = new QualityAssessment
-            {
-                Score = 0,
-                Suspicious = false,
-                Reasons = ["Silero VAD found no speech in this interval; Whisper was not invoked."]
-            },
-            Segments = [],
-            Attempts = []
-        };
 
         private static ChunkTranscriptionResult CreateAcceptedChunkResult(
             AudioChunk chunk,
@@ -1270,9 +1491,7 @@ namespace WhisperCLI.Transcribers
                 }
 
                 _logger.Information("Loading Whisper model: {model}", model);
-                _factory = WhisperFactory.FromPath(
-                    modelFile.FullName,
-                    WhisperRuntimeManager.CreateFactoryOptions(_options));
+                _factory = WhisperRuntimeManager.CreateFactory(modelFile.FullName, _options);
                 WhisperRuntimeManager.ValidateLoadedRuntime(_logger);
                 _loadedModel = model;
                 return _factory;

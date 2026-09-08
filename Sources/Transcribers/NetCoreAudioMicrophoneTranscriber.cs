@@ -1,4 +1,4 @@
-﻿using Serilog;
+using Serilog;
 using Whisper.net;
 using System.Text;
 using WhisperCLI.AudioHandlers;

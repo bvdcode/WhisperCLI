@@ -1,162 +1,115 @@
-# Robust long-file transcription
+# Robust long-file transcription — v5
 
-This build changes file transcription from one continuous Whisper decode into an adaptive,
-checkpointed pipeline intended for long recordings where Whisper occasionally enters a
-repetition/hallucination loop.
+This build keeps the robust long-file pipeline while restoring the Whisper.net runtime generation
+from the original GPU-working application.
 
-Microphone mode remains lightweight. The robust pipeline is used when an input file path is
-provided.
+## Important GPU compatibility decision
 
-## Recommended commands
+The original project used:
 
-For a Russian recording, explicitly fix the language when you know it:
-
-```bash
-dotnet run -- "recording.mp3" --language ru -m LargeV3Turbo
+```xml
+<PackageReference Include="Whisper.net" Version="1.8.1" />
+<PackageReference Include="Whisper.net.AllRuntimes" Version="1.8.1" />
 ```
 
-For automatic language detection:
+v5 restores those exact versions. This is intentional. Whisper.net 1.8.1's CUDA runtime requires
+CUDA Toolkit 12.1+, while the later 1.9.1 packages changed the CUDA runtime requirements. Upgrading
+Whisper.net caused this application to select CPU on a machine where the original 1.8.1 build had
+already been proven to use the NVIDIA GPU.
 
-```bash
-dotnet run -- "recording.mp3" -m LargeV3Turbo
+For the default `--runtime auto` path, v5 also uses the same factory overload as the original code:
+
+```csharp
+WhisperFactory.FromPath(modelPath)
 ```
 
-When running an already built executable, replace `dotnet run --` with the executable name,
-for example:
+so Whisper.net 1.8.1 keeps its own original runtime order and factory defaults (`UseGpu=true`).
 
-```bash
-WhisperCLI "recording.mp3" --language ru -m LargeV3Turbo
+A correct v5 startup prints:
+
+```text
+WhisperCLI robust build: v6-vulkan-gpu-compatible
+Whisper runtime preference: auto; compatibility package=Whisper.net 1.8.1; ...
 ```
 
-## What happens automatically
+After the first model is loaded, look for:
 
-1. The input is converted once to 16 kHz mono PCM WAV.
-2. Silero VAD finds speech/silence boundaries.
-3. The complete recording timeline is divided into independent coarse chunks (75 s target, 90 s maximum).
-   VAD is used to choose safe boundaries; it is not used to concatenate tiny speech fragments.
-4. Silence-only chunks are skipped instead of being sent to Whisper, reducing silence
-   hallucinations.
-5. Each speech chunk gets a fresh `WhisperProcessor` so decoder history cannot poison the
+```text
+Whisper native runtime loaded: Cuda; GPU acceleration active=True
+```
+
+## Why Silero VAD is no longer used
+
+Silero VAD support was added to Whisper.net after 1.8.1. Rather than keep a newer Whisper native
+runtime just for VAD, v5 uses a small managed energy/silence detector over the normalized PCM16 WAV.
+It is deliberately **only a chunk-boundary hint**. It never decides that audio should be deleted or
+skipped. Every coarse audio chunk is still sent to Whisper.
+
+This preserves the important behavior: chunk boundaries prefer quiet gaps, while a detector mistake
+cannot silently remove a quiet sentence.
+
+`--use-vad false` disables this managed boundary detector and uses fixed-duration chunks.
+
+## Recommended command
+
+```bash
+dotnet run -- -m LargeV3 "/path/to/recording.mp3"
+```
+
+If the language is known and you are starting a fresh job, specifying it is normally preferable:
+
+```bash
+dotnet run -- -m LargeV3 --language ru "/path/to/recording.mp3"
+```
+
+If you already have a checkpoint created with `--language auto`, keep `auto` until that recording is
+finished so the existing checkpoint fingerprint remains compatible.
+
+## Robust pipeline
+
+1. Normalize input once to 16 kHz mono PCM16 WAV.
+2. Detect quiet gaps with the managed boundary detector.
+3. Split the complete timeline into independent coarse chunks (75 s target, 90 s hard maximum).
+4. Give every chunk a fresh `WhisperProcessor`, preventing a bad decoder history from poisoning the
    rest of a long recording.
-6. The normal pass keeps only 64 previous-text tokens inside that chunk.
-7. Output is continuously checked for repetition loops. An obvious loop aborts the current
-   attempt early.
-8. Suspicious chunks are retried automatically:
-   - same model with previous-text conditioning disabled;
+5. Limit previous-text conditioning to 64 tokens on the primary attempt.
+6. Watch generated segments for obvious repetition loops and abort a bad attempt early.
+7. If a chunk is suspicious, retry automatically:
+   - same model with `WithNoContext()`;
    - same model with a shifted/wider audio boundary;
-   - lazily loaded fallback Large models;
-   - recursive split at a VAD silence gap if all direct attempts are still suspicious.
-9. Only one Large Whisper model is kept loaded at a time to avoid exhausting GPU VRAM.
-10. Completed top-level chunks are checkpointed after every chunk, so an interrupted run can
-    resume without retranscribing completed work.
-11. Accepted segments are merged by absolute timestamps; no ChatGPT stitching step is needed.
+   - fallback Large model(s), loaded lazily;
+   - recursive split near a quiet gap if direct retries still fail.
+8. Keep only one Large model loaded at a time to avoid exhausting GPU VRAM.
+9. Save a checkpoint and `.partial.*` outputs after every completed top-level chunk.
+10. Merge accepted segments by absolute timestamps into TXT/SRT/VTT.
 
-## Default model recovery
+Whisper.net 1.8.1 already provides both `WithMaxLastTextTokens()` and `WithNoContext()`, so the
+anti-loop strategy does not require a newer Whisper.net version.
 
-`--fallback-models auto` is the default.
+## Resume behavior
 
-- `LargeV3Turbo` -> `LargeV3`, then `LargeV2`
-- `LargeV3` -> `LargeV3Turbo`, then `LargeV2`
-- `LargeV2` -> `LargeV3`, then `LargeV3Turbo`
+v5 preserves a contiguous prefix of completed chunks from the v4 checkpoint when the fingerprint
+matches, even though future pause boundaries are now produced by the managed detector. For the
+recording used during development, this means completed work through approximately `00:06:17.650`
+can remain reusable while only the unprocessed suffix is replanned.
 
-Fallback model files are resolved/downloaded only if a suspicious chunk actually reaches that
-stage. A fallback is never loaded alongside another Large model.
-
-Disable model fallback:
-
-```bash
-WhisperCLI "recording.mp3" --fallback-models none
-```
-
-Choose fallbacks explicitly:
-
-```bash
-WhisperCLI "recording.mp3" --fallback-models LargeV3,LargeV2
-```
-
-## Output files
-
-For `recording.mp3`, the application writes:
-
-- `recording.txt` - final merged transcript
-- `recording.srt` - timestamped subtitles
-- `recording.vtt` - timestamped WebVTT
-- `recording.transcription.json` - complete machine-readable run diagnostics
-- `recording.transcription.log` - human-readable chunk/attempt diagnostics
-- `recording.transcription.checkpoint.json` - resumable progress
-- `recording.transcription.review.txt` - created only when automatic recovery is exhausted for
-  one or more intervals
-
-If `recording.transcription.review.txt` does not exist after a successful run, no interval was
-left flagged by the automatic quality detector.
-
-## Useful options
+## Runtime options
 
 ```text
---language ru                    Fix language when known (recommended)
---language auto                  Automatic language detection
---fallback-models auto           Automatic fallback Large models (default)
---fallback-models none           Disable model fallback
---chunk-seconds 75               Target independent chunk duration
---max-chunk-seconds 90           Hard chunk/VAD speech-region maximum
---max-context-tokens 64          Normal-pass previous-text context limit
---entropy-threshold 2.7          Whisper entropy fallback threshold
---glitch-threshold 0.65          Automatic rejection threshold
---max-recovery-depth 2           Recursive recovery split depth
---resume false                   Ignore an existing matching checkpoint
---use-vad false                  Disable VAD and use fixed-duration chunks
---lock-detected-language false   Keep re-detecting language in auto mode
--v                               Verbose per-segment diagnostics
+--runtime auto      Preserve Whisper.net 1.8.1's original automatic runtime selection (default)
+--runtime gpu       Require the 1.8.1 CUDA runtime
+--runtime cuda      Same as gpu
+--runtime cuda12    Alias for cuda in this compatibility build
+--runtime cpu       Intentionally use CPU
+--gpu-device N      Select GPU device (default 0)
 ```
 
-Options that default to true accept an explicit value, for example `--resume false` or
-`--use-vad false`.
+`cuda13` is intentionally rejected in v5 because supporting it would require moving back to the
+newer runtime generation that caused the regression.
 
-## If a run still has a bad interval
+## Incremental output and cancellation
 
-Send both of these files with the original problematic interval description:
-
-```text
-recording.transcription.log
-recording.transcription.json
-```
-
-They record the exact chunk timestamps, model and recovery strategy selected, rejected
-attempts, repetition score/reasons, elapsed time, and whether the live loop detector aborted an
-attempt. This should make tuning a specific failure reproducible instead of relying on manual
-trial-and-error.
-
-## FFmpeg normalization implementation
-
-FFmpeg is downloaded through `Xabe.FFmpeg.Downloader`, but audio normalization is invoked directly
-with `System.Diagnostics.Process` and `ProcessStartInfo.ArgumentList`. This deliberately avoids the
-Xabe conversion argument builder for the `-i`/output command. It is safe for paths containing spaces
-or non-ASCII characters and, on failure, the exception now includes the useful tail of FFmpeg stderr.
-
-## GPU runtime selection (v3)
-
-WhisperCLI now makes native-runtime selection visible. On startup it probes `nvidia-smi`.
-
-- `--runtime auto` (default): if an NVIDIA GPU is detected, CUDA is expected. The application refuses to silently run Large models on CPU if Whisper.net falls back to a CPU runtime.
-- `--runtime gpu`: allow CUDA 13 or CUDA 12 only.
-- `--runtime cuda`: force the CUDA 13 Whisper.net runtime.
-- `--runtime cuda12`: force the CUDA 12 Whisper.net runtime.
-- `--runtime cpu`: intentionally use CPU.
-- `--gpu-device N`: select the GPU device index passed to Whisper (default 0).
-
-Whisper.net 1.9.1 provides both CUDA 13 and CUDA 12 runtimes. The host must still have the matching NVIDIA runtime/toolkit libraries available. If CUDA cannot be loaded, WhisperCLI now stops with an explicit error instead of spending minutes per chunk on accidental CPU inference.
-
-Example:
-
-```bash
-dotnet run -- -m LargeV3 --runtime cuda12 --language ru "/path/to/recording.mp3"
-```
-
-The startup log prints the detected NVIDIA GPU, the selected `RuntimeLibrary`, and Whisper's native system information. `GPU acceleration active=True` is the line to look for.
-
-## Incremental results and cancellation (v3)
-
-Long-file transcription now writes usable progress after every completed top-level chunk:
+After each completed chunk:
 
 ```text
 recording.partial.txt
@@ -165,20 +118,56 @@ recording.partial.vtt
 recording.transcription.checkpoint.json
 ```
 
-These files live next to the input recording. They are rebuilt from the checkpoint when a run resumes, so completed chunks remain readable even if the process is interrupted. On successful completion the final `recording.txt/.srt/.vtt` files are written and the `.partial.*` files are removed.
+First `Ctrl+C` requests cooperative cancellation and preserves completed chunks. A second `Ctrl+C`
+allows immediate OS termination if native inference does not return promptly.
 
-Cancellation is two-stage:
+On successful completion:
 
-1. First `Ctrl+C`: request cooperative cancellation and preserve all completed chunks/checkpoints.
-2. Second `Ctrl+C`: terminate immediately if native inference does not return promptly.
-
-## v4 installation note
-
-The `WhisperCLI_Robust_Transcription_v4_SourcesOverlay.zip` archive is intentionally rooted at the contents of the `Sources` directory. Extract it **while inside your existing `WhisperCLI/Sources` directory**. At startup, a correct v4 installation prints:
-
-```
-WhisperCLI robust build: v4-gpu-runtime
-Whisper runtime preference: ...
+```text
+recording.txt
+recording.srt
+recording.vtt
+recording.transcription.json
+recording.transcription.log
 ```
 
-If those lines are absent, you are running an older source tree/build.
+`recording.transcription.review.txt` is created only when an interval remains questionable after the
+recovery ladder is exhausted.
+
+## Fallback models
+
+Default `--fallback-models auto`:
+
+- `LargeV3Turbo` -> `LargeV3`, then `LargeV2`
+- `LargeV3` -> `LargeV3Turbo`, then `LargeV2`
+- `LargeV2` -> `LargeV3`, then `LargeV3Turbo`
+
+Fallback model files are only resolved when a suspicious chunk actually reaches that stage.
+
+## Useful options
+
+```text
+--language ru
+--fallback-models auto
+--fallback-models none
+--chunk-seconds 75
+--max-chunk-seconds 90
+--max-context-tokens 64
+--entropy-threshold 2.7
+--glitch-threshold 0.65
+--max-recovery-depth 2
+--resume false
+--use-vad false
+-v
+```
+
+## FFmpeg
+
+Xabe is retained for downloading FFmpeg. Normalization itself invokes FFmpeg with
+`ProcessStartInfo.ArgumentList`, so paths containing spaces and Cyrillic are passed without shell
+quoting problems.
+
+
+## v6 runtime correction
+
+Whisper.net 1.8.1 can use either CUDA or Vulkan as a GPU backend. In `--runtime auto`, both are accepted as GPU acceleration. A runtime-selection failure is treated as fatal and is not fed into the transcription recovery ladder.
