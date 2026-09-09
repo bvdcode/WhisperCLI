@@ -1,4 +1,4 @@
-using NAudio.Wave;
+﻿using NAudio.Wave;
 using Serilog;
 using System.Diagnostics;
 using System.Globalization;
@@ -24,7 +24,7 @@ namespace WhisperCLI.Transcribers
             PropertyNameCaseInsensitive = true
         };
         private string? _lastWorkerRuntime;
-        private bool _nvidiaPrimeGuardLogged;
+        private bool _cudaLibraryGuardLogged;
 
         public FileTranscriber(
             ILogger logger,
@@ -82,6 +82,11 @@ namespace WhisperCLI.Transcribers
             _logger.Information("Pre-resolving primary Whisper model file before transcription: {model}", options.Model);
             await models.GetAsync(options.Model, token);
             _logger.Information("Primary Whisper model file is ready: {model}", options.Model);
+
+            if (ShouldUseLinuxNvidiaCudaOnly())
+            {
+                CudaRuntimeLocator.LogAndValidate(_logger);
+            }
 
             await CheckFfmpegAsync(token);
             FileInfo normalized = await ConvertToWaveFileAsync(inputFile, token);
@@ -455,7 +460,7 @@ namespace WhisperCLI.Transcribers
                     ModelPath = modelFile.FullName,
                     AudioPath = chunkWavPath,
                     Language = string.IsNullOrWhiteSpace(lockedLanguage) ? options.Language : lockedLanguage,
-                    Runtime = options.Runtime,
+                    Runtime = EffectiveWorkerRuntime(options.Runtime),
                     GpuDevice = options.GpuDevice,
                     NoContext = profile.NoContext,
                     EntropyThreshold = options.EntropyThreshold,
@@ -591,43 +596,19 @@ namespace WhisperCLI.Transcribers
                 WorkingDirectory = AppContext.BaseDirectory
             };
 
-            // Whisper.net 1.8.1's native whisper.cpp generation can ignore GpuDevice for
-            // Vulkan and use the first Vulkan physical device. On hybrid Linux laptops the
-            // first device is commonly the Intel iGPU while NVIDIA is device 1. If CUDA
-            // cannot load, auto therefore falls through to Vulkan and can run/crash on the
-            // wrong GPU. NVIDIA documents these PRIME variables specifically for Vulkan:
-            // they cause the NV Optimus layer to put/report NVIDIA first. The setting is
-            // scoped to the isolated worker only; it does not alter the user's desktop.
-            bool nvidiaPrimeGuard = ShouldForceNvidiaVulkanFirst();
-            if (nvidiaPrimeGuard)
+            // Linux/NVIDIA workers are CUDA-only. Whisper.net 1.8.1 requires external
+            // CUDA 12 runtime/cuBLAS libraries; discover their existing locations and inject
+            // those directories into the child process before Whisper.net probes CUDA.
+            if (ShouldUseLinuxNvidiaCudaOnly())
             {
-                startInfo.Environment["__NV_PRIME_RENDER_OFFLOAD"] = "1";
-                startInfo.Environment["__VK_LAYER_NV_optimus"] = "NVIDIA_only";
-
-                // Make the selection independent of whisper.cpp's historically unreliable
-                // gpu_device handling. Restrict the Vulkan loader itself to NVIDIA's ICD when
-                // we can locate it. Both variable names are populated because VK_DRIVER_FILES
-                // is the current name while VK_ICD_FILENAMES is supported by older loaders.
-                string[] nvidiaIcdFiles = FindNvidiaVulkanIcdFiles();
-                if (nvidiaIcdFiles.Length > 0)
+                CudaRuntimeLocator.ApplyTo(startInfo);
+                if (!_cudaLibraryGuardLogged)
                 {
-                    string icdList = string.Join(Path.PathSeparator, nvidiaIcdFiles);
-                    startInfo.Environment["VK_DRIVER_FILES"] = icdList;
-                    startInfo.Environment["VK_ICD_FILENAMES"] = icdList;
-                }
-
-                // Newer ggml Vulkan builds additionally understand this filter. Once the
-                // loader is NVIDIA-only (or the Optimus layer puts NVIDIA first), device 0 is
-                // the RTX GPU. Older builds simply ignore this variable.
-                startInfo.Environment["GGML_VK_VISIBLE_DEVICES"] = "0";
-
-                if (!_nvidiaPrimeGuardLogged)
-                {
-                    _nvidiaPrimeGuardLogged = true;
+                    _cudaLibraryGuardLogged = true;
+                    CudaRuntimeProbe probe = CudaRuntimeLocator.Probe();
                     _logger.Information(
-                        "Linux NVIDIA Vulkan guard enabled for isolated workers: PRIME offload + NVIDIA_only + GGML_VK_VISIBLE_DEVICES=0; NVIDIA ICD={icd}. " +
-                        "If CUDA is unavailable, Vulkan must enumerate the NVIDIA GPU first instead of the Intel iGPU.",
-                        nvidiaIcdFiles.Length == 0 ? "<not found; PRIME layer only>" : string.Join(", ", nvidiaIcdFiles));
+                        "Linux NVIDIA CUDA worker guard enabled: Vulkan disabled; CUDA_VISIBLE_DEVICES=0; LD_LIBRARY_PATH augmented with {dirs}",
+                        probe.LibraryDirectories.Count == 0 ? "<system loader paths>" : string.Join(Path.PathSeparator, probe.LibraryDirectories));
                 }
             }
             if (hostedByDotnet)
@@ -711,7 +692,7 @@ namespace WhisperCLI.Transcribers
             return result;
         }
 
-        private static bool ShouldForceNvidiaVulkanFirst()
+        private static bool ShouldUseLinuxNvidiaCudaOnly()
         {
             if (!OperatingSystem.IsLinux() || !WhisperRuntimeManager.NvidiaDetected)
             {
@@ -719,59 +700,18 @@ namespace WhisperCLI.Transcribers
             }
 
             string runtime = (WhisperRuntimeManager.RuntimePreference ?? "auto").Trim().ToLowerInvariant();
-
-            // Explicit CPU/CUDA modes must remain explicit. The guard is for Whisper.net's
-            // automatic GPU path where CUDA may fail and Vulkan is the next backend.
-            return runtime is "auto" or "gpu" or "nvidia";
+            return runtime is "auto" or "gpu" or "nvidia" or "cuda" or "cuda12";
         }
 
-        private static string[] FindNvidiaVulkanIcdFiles()
+        private static string EffectiveWorkerRuntime(string? requestedRuntime)
         {
-            if (!OperatingSystem.IsLinux())
+            string runtime = (requestedRuntime ?? "auto").Trim().ToLowerInvariant();
+            if (OperatingSystem.IsLinux() && WhisperRuntimeManager.NvidiaDetected &&
+                runtime is "auto" or "gpu" or "nvidia")
             {
-                return [];
+                return "cuda";
             }
-
-            string[] directories =
-            [
-                "/usr/share/vulkan/icd.d",
-                "/etc/vulkan/icd.d",
-                "/usr/local/share/vulkan/icd.d",
-                "/usr/lib/x86_64-linux-gnu/GL/vulkan/icd.d",
-                "/usr/lib64/vulkan/icd.d"
-            ];
-
-            foreach (string directory in directories)
-            {
-                if (!Directory.Exists(directory))
-                {
-                    continue;
-                }
-
-                try
-                {
-                    string[] candidates = Directory
-                        .EnumerateFiles(directory, "*.json", SearchOption.TopDirectoryOnly)
-                        .Where(path => Path.GetFileName(path).Contains("nvidia", StringComparison.OrdinalIgnoreCase))
-                        .OrderBy(path =>
-                            Path.GetFileName(path).Equals("nvidia_icd.json", StringComparison.OrdinalIgnoreCase) ? 0 : 1)
-                        .ThenBy(path => path, StringComparer.Ordinal)
-                        .ToArray();
-
-                    if (candidates.Length > 0)
-                    {
-                        // One ICD is sufficient and avoids duplicate physical-device entries
-                        // when the same NVIDIA driver is registered in more than one directory.
-                        return [candidates[0]];
-                    }
-                }
-                catch
-                {
-                    // Continue to the next standard Vulkan ICD directory.
-                }
-            }
-
-            return [];
+            return runtime;
         }
 
         private static string DiagnoseWorkerBackendFailure(string stderr)
@@ -785,7 +725,13 @@ namespace WhisperCLI.Transcribers
 
             if (stderr.Contains("Cudart library couldn't be loaded", StringComparison.OrdinalIgnoreCase))
             {
-                notes.Add("Whisper.net could not load CUDA's libcudart, so auto mode fell through to another backend");
+                notes.Add("Whisper.net could not load CUDA's libcudart even after CUDA library-path discovery; inspect the preflight LD_LIBRARY_PATH/ldd diagnostics");
+            }
+
+            if (stderr.Contains("[worker] loaded runtime: Cuda", StringComparison.OrdinalIgnoreCase) ||
+                stderr.Contains("ggml_cuda", StringComparison.OrdinalIgnoreCase))
+            {
+                notes.Add("CUDA backend was selected; any exit 139 after this point is a native CUDA/whisper.cpp crash rather than runtime fallback");
             }
 
             string? vulkan0 = stderr
@@ -1587,7 +1533,7 @@ namespace WhisperCLI.Transcribers
                 string json = await File.ReadAllTextAsync(path, token);
                 TranscriptionCheckpoint? checkpoint = JsonSerializer.Deserialize<TranscriptionCheckpoint>(json, JsonOptions);
                 bool matches = checkpoint is not null &&
-                               checkpoint.SchemaVersion == "6" &&
+                               checkpoint.SchemaVersion == "9" &&
                                checkpoint.InputLength == inputFile.Length &&
                                checkpoint.InputLastWriteUtc == inputFile.LastWriteTimeUtc &&
                                checkpoint.Fingerprint == fingerprint;
@@ -1598,9 +1544,9 @@ namespace WhisperCLI.Transcribers
                     return checkpoint!;
                 }
 
-                if (checkpoint is not null && checkpoint.SchemaVersion != "6")
+                if (checkpoint is not null && checkpoint.SchemaVersion != "9")
                 {
-                    _logger.Warning("Ignoring checkpoint schema {schema}; v10 uses schema 6 because Linux hybrid-GPU backend selection changed and older worker results are unsafe to reuse.", checkpoint.SchemaVersion);
+                    _logger.Warning("Ignoring checkpoint schema {schema}; v13 uses schema 9 because native runtime output repair/copy semantics changed and older failed native-runtime checkpoints are unsafe to reuse.", checkpoint.SchemaVersion);
                 }
                 else
                 {

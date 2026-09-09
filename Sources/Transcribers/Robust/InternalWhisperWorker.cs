@@ -52,13 +52,11 @@ internal static class InternalWhisperWorker
             ValidateRequest(request);
             ConfigureRuntime(request);
 
-            if (OperatingSystem.IsLinux() &&
-                string.Equals(Environment.GetEnvironmentVariable("__NV_PRIME_RENDER_OFFLOAD"), "1", StringComparison.Ordinal))
+            if (OperatingSystem.IsLinux() && request.Runtime.Trim().Equals("cuda", StringComparison.OrdinalIgnoreCase))
             {
                 Console.Error.WriteLine(
-                    $"[worker] NVIDIA PRIME Vulkan guard active: __VK_LAYER_NV_optimus={Environment.GetEnvironmentVariable("__VK_LAYER_NV_optimus") ?? "<unset>"}, " +
-                    $"GGML_VK_VISIBLE_DEVICES={Environment.GetEnvironmentVariable("GGML_VK_VISIBLE_DEVICES") ?? "<unset>"}, " +
-                    $"VK_DRIVER_FILES={Environment.GetEnvironmentVariable("VK_DRIVER_FILES") ?? "<unset>"}");
+                    $"[worker] CUDA-only guard active: CUDA_VISIBLE_DEVICES={Environment.GetEnvironmentVariable("CUDA_VISIBLE_DEVICES") ?? "<unset>"}, " +
+                    $"LD_LIBRARY_PATH={Environment.GetEnvironmentVariable("LD_LIBRARY_PATH") ?? "<unset>"}");
             }
 
             // Keep native diagnostics out of stdout: stdout is intentionally unused by the

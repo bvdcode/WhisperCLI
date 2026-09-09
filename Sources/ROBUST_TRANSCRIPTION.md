@@ -1,4 +1,4 @@
-# Robust long-file transcription — v10
+﻿# Robust long-file transcription — v10
 
 v10 keeps the chunk/retry/checkpoint pipeline but changes the most important reliability boundary: native Whisper inference runs in an isolated child process.
 
@@ -96,3 +96,29 @@ globally and do not change the desktop session.
 A healthy Vulkan worker on a hybrid laptop should log device 0 as the NVIDIA GPU.
 If it still logs Intel as Vulkan device 0, v10 reports that explicitly and exits
 without checkpointing the chunk.
+
+
+## v11 Linux/NVIDIA CUDA dependency discovery
+
+On Linux systems with an NVIDIA GPU, `auto` no longer falls back to Vulkan. Both the Intel and NVIDIA Vulkan paths on the tested RTX 4060 laptop terminated the native worker with SIGSEGV. v11 therefore discovers existing CUDA 12 runtime/cuBLAS libraries (`libcudart.so.12`, `libcublas.so.12`, and transitive dependencies), verifies the shipped `libggml-cuda-whisper.so` with `ldd`, augments the isolated worker's `LD_LIBRARY_PATH`, and runs CUDA only. It searches system/ldconfig paths, `/usr/local/cuda*`, Conda, and Python `nvidia-*` package locations. If dependencies are absent it fails before audio preprocessing with the exact missing `.so` names.
+
+## v13 native-runtime copy repair
+
+v13 fixes a build-order bug introduced by v12. v12 correctly pinned the runtime packages, but its custom MSBuild cleanup target could delete freshly copied Whisper native files from `bin/.../runtimes` after NuGet had staged them. Earlier builds temporarily
+used Whisper.net 1.9.1 and were then returned to 1.8.1. Native Whisper libraries use the same filenames
+between those versions, and incremental build output can retain a newer native `.so` after the managed
+package is downgraded. That produces an ABI/runtime mixture (for example, a managed 1.8.1 build loading
+a CUDA-13 or Linux-Vulkan native payload).
+
+v13 therefore:
+
+- pins `Whisper.net`, `Whisper.net.Runtime`, and `Whisper.net.Runtime.Cuda.Linux` to **exactly 1.8.1**;
+- removes `Whisper.net.AllRuntimes` (and therefore removes Vulkan/OpenVINO/CoreML from the Linux file path);
+- deletes stale Whisper native output files before `CopyFilesToOutputDirectory`, so the resolved package
+  files are recopied even when an older/newer file has a misleading timestamp;
+- checks the actual ELF dependencies with `ldd` and derives the required CUDA major from the binary;
+- rejects a CUDA-13 native binary in this pinned 1.8.1 compatibility build as a stale/mixed build instead
+  of telling the user to install CUDA 13.
+
+After applying v13, perform one explicit clean rebuild (`rm -rf bin obj && dotnet restore --force`). v13 also has a development-time repair fallback: if `libggml-cuda-whisper.so` is absent from output, it searches the exact NuGet cache package `whisper.net.runtime.cuda.linux/1.8.1` and copies the native sibling `.so` files into `runtimes/cuda/linux-x64` before CUDA dependency preflight. Future normal
+`dotnet run` builds include the stale-native cleanup target automatically.

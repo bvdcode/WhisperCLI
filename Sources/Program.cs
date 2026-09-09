@@ -1,4 +1,4 @@
-using CommandLine;
+﻿using CommandLine;
 using Serilog;
 using Serilog.Events;
 using System.Diagnostics;
@@ -100,7 +100,7 @@ namespace WhisperCLI
                 FileInfo result;
                 string osType = Environment.OSVersion.Platform.ToString();
                 logger.Information("Operating System: {osType}", osType);
-                logger.Information("WhisperCLI robust build: v10-nvidia-prime-vulkan");
+                logger.Information("WhisperCLI robust build: v13-runtime-copy-repair");
 
                 WhisperRuntimeManager.Configure(options, logger);
 

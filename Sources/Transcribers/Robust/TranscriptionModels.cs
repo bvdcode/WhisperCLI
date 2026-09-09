@@ -1,4 +1,4 @@
-namespace WhisperCLI.Transcribers.Robust;
+﻿namespace WhisperCLI.Transcribers.Robust;
 
 public sealed class SpeechRegion
 {
@@ -64,7 +64,7 @@ public sealed class ChunkTranscriptionResult
 
 public sealed class TranscriptionCheckpoint
 {
-    public string SchemaVersion { get; set; } = "6";
+    public string SchemaVersion { get; set; } = "9";
     public string InputPath { get; set; } = string.Empty;
     public long InputLength { get; set; }
     public DateTime InputLastWriteUtc { get; set; }
@@ -75,7 +75,7 @@ public sealed class TranscriptionCheckpoint
 
 public sealed class TranscriptionRunReport
 {
-    public string SchemaVersion { get; set; } = "6";
+    public string SchemaVersion { get; set; } = "9";
     public string InputPath { get; set; } = string.Empty;
     public DateTime StartedUtc { get; set; }
     public DateTime CompletedUtc { get; set; }

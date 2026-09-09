@@ -1,4 +1,4 @@
-using Serilog;
+﻿using Serilog;
 using System.Diagnostics;
 using Whisper.net;
 using Whisper.net.LibraryLoader;
@@ -145,7 +145,14 @@ internal static class WhisperRuntimeManager
 
             if (RuntimePreference == "auto")
             {
-                logger.Information("Runtime auto compatibility mode: Whisper.net RuntimeLibraryOrder was left untouched (same selection path as the original application).");
+                if (OperatingSystem.IsLinux() && NvidiaDetected)
+                {
+                    logger.Information("Linux/NVIDIA robust mode: isolated workers use CUDA only. Vulkan is disabled because both Intel and NVIDIA Vulkan paths have produced native SIGSEGV failures on this machine.");
+                }
+                else
+                {
+                    logger.Information("Runtime auto compatibility mode: Whisper.net RuntimeLibraryOrder was left untouched (same selection path as the original application).");
+                }
             }
         }
     }
