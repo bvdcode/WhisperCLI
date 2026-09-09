@@ -1,173 +1,98 @@
-# Robust long-file transcription — v5
+# Robust long-file transcription — v10
 
-This build keeps the robust long-file pipeline while restoring the Whisper.net runtime generation
-from the original GPU-working application.
+v10 keeps the chunk/retry/checkpoint pipeline but changes the most important reliability boundary: native Whisper inference runs in an isolated child process.
 
-## Important GPU compatibility decision
+Why: whisper.cpp/Whisper.net GPU backends can terminate the entire .NET process with a native access violation/segfault/stack overflow. Such failures cannot be caught reliably by `try/catch`. In v10 the parent CLI survives, reports the worker exit code and native stderr tail, and never records the failed chunk as completed.
 
-The original project used:
-
-```xml
-<PackageReference Include="Whisper.net" Version="1.8.1" />
-<PackageReference Include="Whisper.net.AllRuntimes" Version="1.8.1" />
-```
-
-v5 restores those exact versions. This is intentional. Whisper.net 1.8.1's CUDA runtime requires
-CUDA Toolkit 12.1+, while the later 1.9.1 packages changed the CUDA runtime requirements. Upgrading
-Whisper.net caused this application to select CPU on a machine where the original 1.8.1 build had
-already been proven to use the NVIDIA GPU.
-
-For the default `--runtime auto` path, v5 also uses the same factory overload as the original code:
-
-```csharp
-WhisperFactory.FromPath(modelPath)
-```
-
-so Whisper.net 1.8.1 keeps its own original runtime order and factory defaults (`UseGpu=true`).
-
-A correct v5 startup prints:
-
-```text
-WhisperCLI robust build: v6-vulkan-gpu-compatible
-Whisper runtime preference: auto; compatibility package=Whisper.net 1.8.1; ...
-```
-
-After the first model is loaded, look for:
-
-```text
-Whisper native runtime loaded: Cuda; GPU acceleration active=True
-```
-
-## Why Silero VAD is no longer used
-
-Silero VAD support was added to Whisper.net after 1.8.1. Rather than keep a newer Whisper native
-runtime just for VAD, v5 uses a small managed energy/silence detector over the normalized PCM16 WAV.
-It is deliberately **only a chunk-boundary hint**. It never decides that audio should be deleted or
-skipped. Every coarse audio chunk is still sent to Whisper.
-
-This preserves the important behavior: chunk boundaries prefer quiet gaps, while a detector mistake
-cannot silently remove a quiet sentence.
-
-`--use-vad false` disables this managed boundary detector and uses fixed-duration chunks.
-
-## Recommended command
+## Normal command
 
 ```bash
-dotnet run -- -m LargeV3 "/path/to/recording.mp3"
+dotnet run -m LargeV3 "/path/to/recording.mp3"
 ```
 
-If the language is known and you are starting a fresh job, specifying it is normally preferable:
+For known Russian recordings you can use `--language ru` on a fresh run.
 
-```bash
-dotnet run -- -m LargeV3 --language ru "/path/to/recording.mp3"
-```
+## Primary decoding path
 
-If you already have a checkpoint created with `--language auto`, keep `auto` until that recording is
-finished so the existing checkpoint fingerprint remains compatible.
+For the first attempt of every chunk the child worker deliberately mirrors the old working application's Whisper setup:
 
-## Robust pipeline
+- `WhisperFactory.FromPath(modelPath)` in `--runtime auto`;
+- `factory.CreateBuilder().WithLanguage(...).Build()`;
+- a normal FFmpeg-produced 16-kHz mono PCM16 WAV stream is passed to `ProcessAsync`. v10 stores that attempt WAV as a physical temporary file so it can validate it before crossing the native boundary.
 
-1. Normalize input once to 16 kHz mono PCM16 WAV.
-2. Detect quiet gaps with the managed boundary detector.
-3. Split the complete timeline into independent coarse chunks (75 s target, 90 s hard maximum).
-4. Give every chunk a fresh `WhisperProcessor`, preventing a bad decoder history from poisoning the
-   rest of a long recording.
-5. Limit previous-text conditioning to 64 tokens on the primary attempt.
-6. Watch generated segments for obvious repetition loops and abort a bad attempt early.
-7. If a chunk is suspicious, retry automatically:
-   - same model with `WithNoContext()`;
-   - same model with a shifted/wider audio boundary;
-   - fallback Large model(s), loaded lazily;
-   - recursive split near a quiet gap if direct retries still fail.
-8. Keep only one Large model loaded at a time to avoid exhausting GPU VRAM.
-9. Save a checkpoint and `.partial.*` outputs after every completed top-level chunk.
-10. Merge accepted segments by absolute timestamps into TXT/SRT/VTT.
+No `WithMaxLastTextTokens`, temperature, or entropy override is applied to the normal pass. Robustness comes from independent chunk/process boundaries. More aggressive decoder settings are used only after a valid transcription is judged suspicious.
 
-Whisper.net 1.8.1 already provides both `WithMaxLastTextTokens()` and `WithNoContext()`, so the
-anti-loop strategy does not require a newer Whisper.net version.
+## Native crash isolation
 
-## Resume behavior
-
-v5 preserves a contiguous prefix of completed chunks from the v4 checkpoint when the fingerprint
-matches, even though future pause boundaries are now produced by the managed detector. For the
-recording used during development, this means completed work through approximately `00:06:17.650`
-can remain reusable while only the unprocessed suffix is replanned.
-
-## Runtime options
+Each transcription attempt runs as an internal child process. If a GPU backend crashes, the parent reports a message such as:
 
 ```text
---runtime auto      Preserve Whisper.net 1.8.1's original automatic runtime selection (default)
---runtime gpu       Require the 1.8.1 CUDA runtime
---runtime cuda      Same as gpu
---runtime cuda12    Alias for cuda in this compatibility build
---runtime cpu       Intentionally use CPU
---gpu-device N      Select GPU device (default 0)
+Isolated Whisper worker terminated abnormally (exit code 139) ...
 ```
 
-`cuda13` is intentionally rejected in v5 because supporting it would require moving back to the
-newer runtime generation that caused the regression.
+No checkpoint entry is written for that chunk. The run stops instead of manufacturing empty review chunks.
 
-## Incremental output and cancellation
+## Recovery ladder
 
-After each completed chunk:
+For a valid but suspicious transcription:
 
-```text
-recording.partial.txt
-recording.partial.srt
-recording.partial.vtt
-recording.transcription.checkpoint.json
-```
+1. primary model, original/default context;
+2. primary model with `NoContext` and fallback decoding settings;
+3. shifted boundaries with `NoContext`;
+4. fallback large models for only that chunk;
+5. recursive split when needed.
 
-First `Ctrl+C` requests cooperative cancellation and preserves completed chunks. A second `Ctrl+C`
-allows immediate OS termination if native inference does not return promptly.
+Execution/backend exceptions are never treated as transcription quality failures.
 
-On successful completion:
+## Chunk files
 
-```text
-recording.txt
-recording.srt
-recording.vtt
-recording.transcription.json
-recording.transcription.log
-```
+The parent normalizes the original recording once, then creates each attempt WAV with FFmpeg. This avoids passing an NAudio-generated in-memory sub-WAV into native Whisper.
 
-`recording.transcription.review.txt` is created only when an interval remains questionable after the
-recovery ladder is exhausted.
+## Partial results and resume
 
-## Fallback models
+After each accepted top-level chunk:
 
-Default `--fallback-models auto`:
+- `<name>.partial.txt`
+- `<name>.partial.srt`
+- `<name>.partial.vtt`
+- `<name>.transcription.checkpoint.json`
 
-- `LargeV3Turbo` -> `LargeV3`, then `LargeV2`
-- `LargeV3` -> `LargeV3Turbo`, then `LargeV2`
-- `LargeV2` -> `LargeV3`, then `LargeV3Turbo`
+are updated. Ctrl+C kills the active worker and leaves already completed chunks reusable.
 
-Fallback model files are only resolved when a suspicious chunk actually reaches that stage.
+v10 uses checkpoint schema 6. Older schemas are intentionally ignored because they were produced before native-process isolation and may contain execution failures recorded as completed chunks.
 
-## Useful options
+## Runtimes
 
-```text
---language ru
---fallback-models auto
---fallback-models none
---chunk-seconds 75
---max-chunk-seconds 90
---max-context-tokens 64
---entropy-threshold 2.7
---glitch-threshold 0.65
---max-recovery-depth 2
---resume false
---use-vad false
--v
-```
+`--runtime auto` leaves Whisper.net 1.8.1 runtime selection untouched, matching the original application. Explicit `cpu`, `cuda`/`cuda12`, and `vulkan` modes remain available for diagnosis. On a machine where an NVIDIA GPU is detected, v10 refuses a silent CPU fallback unless `--runtime cpu` was explicitly requested.
 
-## FFmpeg
+## Clipboard
 
-Xabe is retained for downloading FFmpeg. Normalization itself invokes FFmpeg with
-`ProcessStartInfo.ArgumentList`, so paths containing spaces and Cyrillic are passed without shell
-quoting problems.
+Missing Linux clipboard helpers such as `xsel` only produce a warning; transcription files remain successful.
+
+## Performance note
+
+v10 deliberately starts a fresh worker for each attempt. This adds model-load overhead, but it is the safest boundary while diagnosing the native GPU crash seen in v8. Once the backend is confirmed stable, the worker can be made persistent per model without changing the checkpoint/recovery design.
 
 
-## v6 runtime correction
+## Linux hybrid NVIDIA/Intel laptops
 
-Whisper.net 1.8.1 can use either CUDA or Vulkan as a GPU backend. In `--runtime auto`, both are accepted as GPU acceleration. A runtime-selection failure is treated as fatal and is not fed into the transcription recovery ladder.
+Whisper.net 1.8.1 may fall back from CUDA to Vulkan when `libcudart` is unavailable.
+The bundled native whisper.cpp generation can ignore `GpuDevice` for Vulkan and use
+the first enumerated Vulkan physical device. On Optimus laptops that can be the Intel
+iGPU even when an NVIDIA GPU is present.
+
+v10 scopes the following variables to each isolated Whisper worker in `auto`/`gpu`/
+`nvidia` modes on Linux when NVIDIA is detected:
+
+- `__NV_PRIME_RENDER_OFFLOAD=1`
+- `__VK_LAYER_NV_optimus=NVIDIA_only`
+- `GGML_VK_VISIBLE_DEVICES=0`
+- `VK_DRIVER_FILES=<detected NVIDIA ICD>` and `VK_ICD_FILENAMES=<same>` when an NVIDIA ICD JSON is found
+
+The NVIDIA PRIME Vulkan layer makes the NVIDIA device enumerate first; the GGML filter
+is an additional safeguard on builds that support it. These variables are not set
+globally and do not change the desktop session.
+
+A healthy Vulkan worker on a hybrid laptop should log device 0 as the NVIDIA GPU.
+If it still logs Intel as Vulkan device 0, v10 reports that explicitly and exits
+without checkpointing the chunk.

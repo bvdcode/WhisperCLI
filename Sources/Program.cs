@@ -7,6 +7,7 @@ using Whisper.net;
 using Whisper.net.Ggml;
 using Whisper.net.Logger;
 using WhisperCLI.Transcribers;
+using WhisperCLI.Transcribers.Robust;
 
 namespace WhisperCLI
 {
@@ -14,6 +15,17 @@ namespace WhisperCLI
     {
         public static async Task Main(string[] args)
         {
+            // Native whisper.cpp backends can terminate the process without a managed exception.
+            // Robust file transcription therefore executes each inference attempt in an isolated
+            // worker process. Keep this branch before CommandLineParser so the internal protocol
+            // cannot collide with public CLI options.
+            if (InternalWhisperWorker.IsWorkerInvocation(args))
+            {
+                int workerExitCode = await InternalWhisperWorker.RunAsync(args[1]);
+                Environment.ExitCode = workerExitCode;
+                return;
+            }
+
             AppOptions? options = null;
             ParserResult<AppOptions> parseResult = Parser.Default.ParseArguments<AppOptions>(args);
             parseResult.WithParsed(parsed => options = parsed);
@@ -47,6 +59,7 @@ namespace WhisperCLI
             {
                 if (!string.IsNullOrWhiteSpace(text))
                 {
+                    WhisperRuntimeManager.ObserveNativeLog(level.ToString(), text);
                     logger.Debug("[Whisper] [{level}] {text}", level.ToString().ToUpperInvariant(), text.Trim());
                 }
             });
@@ -87,7 +100,7 @@ namespace WhisperCLI
                 FileInfo result;
                 string osType = Environment.OSVersion.Platform.ToString();
                 logger.Information("Operating System: {osType}", osType);
-                logger.Information("WhisperCLI robust build: v6-vulkan-gpu-compatible");
+                logger.Information("WhisperCLI robust build: v10-nvidia-prime-vulkan");
 
                 WhisperRuntimeManager.Configure(options, logger);
 
@@ -156,7 +169,7 @@ namespace WhisperCLI
                     }
                     catch (Exception ex)
                     {
-                        logger.Error(ex, "Failed to copy transcription result to clipboard.");
+                        logger.Warning(ex, "Could not copy transcription result to clipboard; the transcription files were written successfully.");
                     }
                 }
 
@@ -185,9 +198,9 @@ namespace WhisperCLI
             ArgumentOutOfRangeException.ThrowIfNegative(options.GpuDevice, nameof(options.GpuDevice));
 
             string runtime = (options.Runtime ?? string.Empty).Trim().ToLowerInvariant();
-            if (runtime is not ("auto" or "gpu" or "nvidia" or "cuda" or "cuda12" or "cpu" or "cuda13"))
+            if (runtime is not ("auto" or "gpu" or "nvidia" or "cuda" or "cuda12" or "vulkan" or "cpu" or "cuda13"))
             {
-                throw new ArgumentException("Runtime must be one of: auto, gpu, cuda, cuda12, cpu.", nameof(options.Runtime));
+                throw new ArgumentException("Runtime must be one of: auto, gpu, cuda, cuda12, vulkan, cpu.", nameof(options.Runtime));
             }
             if (runtime == "cuda13")
             {

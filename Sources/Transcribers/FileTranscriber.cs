@@ -1,6 +1,8 @@
 using NAudio.Wave;
 using Serilog;
 using System.Diagnostics;
+using System.Globalization;
+using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -18,8 +20,11 @@ namespace WhisperCLI.Transcribers
         private readonly Func<GgmlType, CancellationToken, Task<FileInfo>>? _modelResolver;
         private static readonly JsonSerializerOptions JsonOptions = new()
         {
-            WriteIndented = true
+            WriteIndented = true,
+            PropertyNameCaseInsensitive = true
         };
+        private string? _lastWorkerRuntime;
+        private bool _nvidiaPrimeGuardLogged;
 
         public FileTranscriber(
             ILogger logger,
@@ -69,6 +74,14 @@ namespace WhisperCLI.Transcribers
             {
                 throw new InvalidOperationException("Robust transcription requires a model resolver.");
             }
+
+            // Resolve the primary model before doing expensive audio preparation. Native Whisper
+            // itself is intentionally loaded only inside an isolated worker process so a backend
+            // crash cannot terminate the parent CLI or poison the checkpoint.
+            ModelFileCache models = new(_modelResolver);
+            _logger.Information("Pre-resolving primary Whisper model file before transcription: {model}", options.Model);
+            await models.GetAsync(options.Model, token);
+            _logger.Information("Primary Whisper model file is ready: {model}", options.Model);
 
             await CheckFfmpegAsync(token);
             FileInfo normalized = await ConvertToWaveFileAsync(inputFile, token);
@@ -144,6 +157,9 @@ namespace WhisperCLI.Transcribers
                             "Preserved completed checkpoint prefix through {resumeAt}; only the remaining audio was replanned",
                             FormatClock(resume.PreservedUntil));
                     }
+                    _logger.Information(
+                        "Active transcription plan after checkpoint merge: {count} chunks total",
+                        chunks.Count);
                 }
 
                 string partialTextPath = BuildSidecarPath(inputFile, ".partial.txt");
@@ -157,10 +173,15 @@ namespace WhisperCLI.Transcribers
                 {
                     await WriteProgressOutputsAsync(inputFile, checkpoint.CompletedChunks, chunks.Count, CancellationToken.None);
                 }
-
-                // The managed boundary detector does not load Whisper. At this point the runtime may
-                // still be unloaded; ValidateLoadedRuntime becomes authoritative after the first model factory is created.
-                WhisperRuntimeManager.ValidateLoadedRuntime(_logger);
+                else
+                {
+                    // Do not leave stale partial/review files from an incompatible or failed older run
+                    // looking like current progress while the first isolated worker is running.
+                    TryDelete(partialTextPath);
+                    TryDelete(partialSrtPath);
+                    TryDelete(partialVttPath);
+                    TryDelete(BuildSidecarPath(inputFile, ".transcription.review.txt"));
+                }
 
                 string? lockedLanguage = null;
                 if (!IsAutoLanguage(options.Language))
@@ -176,7 +197,6 @@ namespace WhisperCLI.Transcribers
                     }
                 }
 
-                using ModelFactoryCache factories = new(_modelResolver, _logger, options);
                 List<ChunkTranscriptionResult> completed = [];
 
                 for (int i = 0; i < chunks.Count; i++)
@@ -208,7 +228,7 @@ namespace WhisperCLI.Transcribers
                             options,
                             fallbackModels,
                             speechRegions,
-                            factories,
+                            models,
                             lockedLanguage,
                             token);
 
@@ -222,7 +242,10 @@ namespace WhisperCLI.Transcribers
                     }
 
                     completed.Add(result);
-                    await WriteProgressOutputsAsync(inputFile, completed, chunks.Count, CancellationToken.None);
+                    if (cached is null)
+                    {
+                        await WriteProgressOutputsAsync(inputFile, completed, chunks.Count, CancellationToken.None);
+                    }
 
                     if (IsAutoLanguage(options.Language) && options.LockDetectedLanguage && string.IsNullOrWhiteSpace(lockedLanguage))
                     {
@@ -267,7 +290,7 @@ namespace WhisperCLI.Transcribers
             AppOptions options,
             IReadOnlyList<GgmlType> fallbackModels,
             IReadOnlyList<SpeechRegion> speechRegions,
-            ModelFactoryCache factories,
+            ModelFileCache models,
             string? lockedLanguage,
             CancellationToken token)
         {
@@ -295,7 +318,7 @@ namespace WhisperCLI.Transcribers
                     chunk,
                     profile,
                     options,
-                    factories,
+                    models,
                     lockedLanguage,
                     token);
 
@@ -353,10 +376,10 @@ namespace WhisperCLI.Transcribers
 
                     ChunkTranscriptionResult leftResult = await TranscribeChunkWithRecoveryAsync(
                         normalizedWavPath, audioDuration, left, depth + 1, options, fallbackModels,
-                        speechRegions, factories, lockedLanguage, token);
+                        speechRegions, models, lockedLanguage, token);
                     ChunkTranscriptionResult rightResult = await TranscribeChunkWithRecoveryAsync(
                         normalizedWavPath, audioDuration, right, depth + 1, options, fallbackModels,
-                        speechRegions, factories, lockedLanguage, token);
+                        speechRegions, models, lockedLanguage, token);
 
                     List<TranscriptSegment> merged = leftResult.Segments
                         .Concat(rightResult.Segments)
@@ -396,15 +419,13 @@ namespace WhisperCLI.Transcribers
             AudioChunk coverage,
             AttemptProfile profile,
             AppOptions options,
-            ModelFactoryCache factories,
+            ModelFileCache models,
             string? lockedLanguage,
             CancellationToken token)
         {
             TimeSpan audioStart = Max(TimeSpan.Zero, coverage.Start - TimeSpan.FromSeconds(profile.PreRollSeconds));
             TimeSpan audioEnd = Min(audioDuration, coverage.End + TimeSpan.FromSeconds(profile.PostRollSeconds));
             Stopwatch sw = Stopwatch.StartNew();
-            List<TranscriptSegment> rawSegments = [];
-            bool liveLoopAborted = false;
 
             var diagnostic = new AttemptDiagnostic
             {
@@ -414,55 +435,94 @@ namespace WhisperCLI.Transcribers
                 AudioEnd = audioEnd
             };
 
+            string? chunkWavPath = null;
+            string? requestPath = null;
+            string? resultPath = null;
             try
             {
-                WhisperFactory factory = await factories.GetAsync(profile.Model, token);
-                var builder = factory.CreateBuilder()
-                    .WithLanguage(string.IsNullOrWhiteSpace(lockedLanguage) ? options.Language : lockedLanguage)
-                    .WithMaxLastTextTokens(options.MaxContextTokens)
-                    .WithEntropyThreshold(options.EntropyThreshold)
-                    .WithTemperature(options.Temperature)
-                    .WithTemperatureInc(options.TemperatureIncrement);
+                FileInfo modelFile = await models.GetAsync(profile.Model, token);
+                chunkWavPath = await ExtractChunkToStandaloneWaveFileAsync(
+                    normalizedWavPath, audioStart, audioEnd, coverage.Id, token);
 
-                if (profile.NoContext)
+                string workerDirectory = Path.Combine(Path.GetTempPath(), "WhisperCLI", "Worker");
+                Directory.CreateDirectory(workerDirectory);
+                string attemptId = $"{coverage.Id}-{profile.Model}-{Guid.NewGuid():N}";
+                requestPath = Path.Combine(workerDirectory, attemptId + ".request.json");
+                resultPath = Path.Combine(workerDirectory, attemptId + ".result.json");
+
+                var request = new WhisperWorkerRequest
                 {
-                    builder.WithNoContext();
+                    ModelPath = modelFile.FullName,
+                    AudioPath = chunkWavPath,
+                    Language = string.IsNullOrWhiteSpace(lockedLanguage) ? options.Language : lockedLanguage,
+                    Runtime = options.Runtime,
+                    GpuDevice = options.GpuDevice,
+                    NoContext = profile.NoContext,
+                    EntropyThreshold = options.EntropyThreshold,
+                    Temperature = options.Temperature,
+                    TemperatureIncrement = options.TemperatureIncrement,
+                    ResultPath = resultPath
+                };
+
+                await File.WriteAllTextAsync(
+                    requestPath,
+                    JsonSerializer.Serialize(request, JsonOptions),
+                    Encoding.UTF8,
+                    token);
+
+                _logger.Information(
+                    "Chunk {chunkId}: launching isolated Whisper worker for {model}/{strategy} on {duration:0.0}s of audio",
+                    coverage.Id, profile.Model, profile.Strategy, (audioEnd - audioStart).TotalSeconds);
+
+                WhisperWorkerResult workerResult = await RunWhisperWorkerProcessAsync(
+                    requestPath, resultPath, coverage.Id, profile.Model, profile.Strategy, sw, token);
+
+                if (!string.IsNullOrWhiteSpace(workerResult.ManagedError))
+                {
+                    throw new WhisperRuntimeUnavailableException(
+                        $"Isolated Whisper worker reported a managed failure for chunk {coverage.Id}:\n{workerResult.ManagedError}");
                 }
 
-                await using WhisperProcessor processor = builder.Build();
-                using MemoryStream audio = WaveChunkReader.ReadChunk(normalizedWavPath, audioStart, audioEnd);
-                using CancellationTokenSource attemptCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+                string loadedRuntime = string.IsNullOrWhiteSpace(workerResult.LoadedRuntime)
+                    ? "<unknown>"
+                    : workerResult.LoadedRuntime;
+                bool gpu = loadedRuntime.Equals("Cuda", StringComparison.OrdinalIgnoreCase) ||
+                           loadedRuntime.Equals("Vulkan", StringComparison.OrdinalIgnoreCase);
 
-                try
+                if (!string.Equals(loadedRuntime, _lastWorkerRuntime, StringComparison.OrdinalIgnoreCase))
                 {
-                    await foreach (var result in processor.ProcessAsync(audio, attemptCts.Token))
+                    _lastWorkerRuntime = loadedRuntime;
+                    _logger.Information(
+                        "Isolated Whisper worker runtime: {runtime}; GPU acceleration active={gpu}; native crashes cannot terminate the parent CLI",
+                        loadedRuntime, gpu);
+                }
+
+                string requestedRuntime = (options.Runtime ?? "auto").Trim().ToLowerInvariant();
+                bool gpuRequired = requestedRuntime is "gpu" or "nvidia" or "cuda" or "cuda12" or "vulkan" ||
+                                   (requestedRuntime == "auto" && WhisperRuntimeManager.NvidiaDetected);
+                if (gpuRequired && !gpu)
+                {
+                    throw new WhisperRuntimeUnavailableException(
+                        $"An NVIDIA GPU is present/requested, but the isolated worker loaded '{loadedRuntime}'. " +
+                        "WhisperCLI will not silently continue the Large model on CPU. Use --runtime cpu only if CPU inference is intentional.");
+                }
+
+                List<TranscriptSegment> rawSegments = workerResult.Segments
+                    .Select(s => new TranscriptSegment
                     {
-                        TranscriptSegment segment = new()
-                        {
-                            Start = audioStart + result.Start,
-                            End = audioStart + result.End,
-                            Text = result.Text,
-                            Language = result.Language
-                        };
-                        rawSegments.Add(segment);
+                        Start = audioStart + s.Start,
+                        End = audioStart + s.End,
+                        Text = s.Text,
+                        Language = s.Language
+                    })
+                    .OrderBy(s => s.Start)
+                    .ToList();
 
-                        _logger.Debug("Chunk {chunkId} {model}/{strategy}: {start}->{end}: {text}",
-                            coverage.Id, profile.Model, profile.Strategy,
-                            FormatClock(segment.Start), FormatClock(segment.End), segment.Text);
+                diagnostic.AbortedForLiveLoop = workerResult.LiveLoopAborted;
 
-                        if (TranscriptionQualityAnalyzer.HasObviousLiveLoop(rawSegments))
-                        {
-                            liveLoopAborted = true;
-                            diagnostic.AbortedForLiveLoop = true;
-                            attemptCts.Cancel();
-                            break;
-                        }
-                    }
-                }
-                catch (OperationCanceledException) when (liveLoopAborted && !token.IsCancellationRequested)
-                {
-                    // Expected: this attempt was deliberately stopped because it entered a repetition loop.
-                }
+                _logger.Information(
+                    "Chunk {chunkId}: isolated Whisper worker returned {segments} raw segments after {elapsed:0.0}s",
+                    coverage.Id, rawSegments.Count, sw.Elapsed.TotalSeconds);
 
                 token.ThrowIfCancellationRequested();
 
@@ -476,7 +536,7 @@ namespace WhisperCLI.Transcribers
                     coverage.Duration,
                     coverage.ExpectedSpeech,
                     options.GlitchThreshold,
-                    liveLoopAborted);
+                    workerResult.LiveLoopAborted);
 
                 sw.Stop();
                 diagnostic.ElapsedSeconds = sw.Elapsed.TotalSeconds;
@@ -489,23 +549,398 @@ namespace WhisperCLI.Transcribers
             }
             catch (WhisperRuntimeUnavailableException)
             {
-                // Runtime/backend selection is an infrastructure failure, not a bad transcript.
-                // Retrying models, shifting boundaries, or recursively splitting audio cannot fix it,
-                // so abort the run immediately instead of creating a retry storm.
                 throw;
             }
             catch (Exception ex)
             {
-                sw.Stop();
-                diagnostic.ElapsedSeconds = sw.Elapsed.TotalSeconds;
-                diagnostic.Error = ex.ToString();
-                diagnostic.Quality = new QualityAssessment
+                // The robust recovery ladder is for *valid but suspicious text*, not execution
+                // failures. Once a worker/model/audio/backend fails to execute, stop the run.
+                throw new WhisperRuntimeUnavailableException(
+                    $"Whisper execution failed for chunk {coverage.Id} using {profile.Model}/{profile.Strategy}. " +
+                    "No checkpoint entry was written for this chunk.", ex);
+            }
+            finally
+            {
+                if (chunkWavPath is not null) TryDelete(chunkWavPath);
+                if (requestPath is not null) TryDelete(requestPath);
+                if (resultPath is not null) TryDelete(resultPath);
+            }
+        }
+
+        private async Task<WhisperWorkerResult> RunWhisperWorkerProcessAsync(
+            string requestPath,
+            string resultPath,
+            string chunkId,
+            GgmlType model,
+            string strategy,
+            Stopwatch stopwatch,
+            CancellationToken token)
+        {
+            string assemblyPath = Assembly.GetExecutingAssembly().Location;
+            string processPath = Environment.ProcessPath ?? "dotnet";
+            bool hostedByDotnet = string.Equals(
+                Path.GetFileNameWithoutExtension(processPath), "dotnet", StringComparison.OrdinalIgnoreCase);
+
+            ProcessStartInfo startInfo = new()
+            {
+                FileName = processPath,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                WorkingDirectory = AppContext.BaseDirectory
+            };
+
+            // Whisper.net 1.8.1's native whisper.cpp generation can ignore GpuDevice for
+            // Vulkan and use the first Vulkan physical device. On hybrid Linux laptops the
+            // first device is commonly the Intel iGPU while NVIDIA is device 1. If CUDA
+            // cannot load, auto therefore falls through to Vulkan and can run/crash on the
+            // wrong GPU. NVIDIA documents these PRIME variables specifically for Vulkan:
+            // they cause the NV Optimus layer to put/report NVIDIA first. The setting is
+            // scoped to the isolated worker only; it does not alter the user's desktop.
+            bool nvidiaPrimeGuard = ShouldForceNvidiaVulkanFirst();
+            if (nvidiaPrimeGuard)
+            {
+                startInfo.Environment["__NV_PRIME_RENDER_OFFLOAD"] = "1";
+                startInfo.Environment["__VK_LAYER_NV_optimus"] = "NVIDIA_only";
+
+                // Make the selection independent of whisper.cpp's historically unreliable
+                // gpu_device handling. Restrict the Vulkan loader itself to NVIDIA's ICD when
+                // we can locate it. Both variable names are populated because VK_DRIVER_FILES
+                // is the current name while VK_ICD_FILENAMES is supported by older loaders.
+                string[] nvidiaIcdFiles = FindNvidiaVulkanIcdFiles();
+                if (nvidiaIcdFiles.Length > 0)
                 {
-                    Score = 1.0,
-                    Suspicious = true,
-                    Reasons = ["attempt failed with an exception: " + ex.Message]
-                };
-                return new AttemptCandidate(profile, [], diagnostic.Quality, diagnostic);
+                    string icdList = string.Join(Path.PathSeparator, nvidiaIcdFiles);
+                    startInfo.Environment["VK_DRIVER_FILES"] = icdList;
+                    startInfo.Environment["VK_ICD_FILENAMES"] = icdList;
+                }
+
+                // Newer ggml Vulkan builds additionally understand this filter. Once the
+                // loader is NVIDIA-only (or the Optimus layer puts NVIDIA first), device 0 is
+                // the RTX GPU. Older builds simply ignore this variable.
+                startInfo.Environment["GGML_VK_VISIBLE_DEVICES"] = "0";
+
+                if (!_nvidiaPrimeGuardLogged)
+                {
+                    _nvidiaPrimeGuardLogged = true;
+                    _logger.Information(
+                        "Linux NVIDIA Vulkan guard enabled for isolated workers: PRIME offload + NVIDIA_only + GGML_VK_VISIBLE_DEVICES=0; NVIDIA ICD={icd}. " +
+                        "If CUDA is unavailable, Vulkan must enumerate the NVIDIA GPU first instead of the Intel iGPU.",
+                        nvidiaIcdFiles.Length == 0 ? "<not found; PRIME layer only>" : string.Join(", ", nvidiaIcdFiles));
+                }
+            }
+            if (hostedByDotnet)
+            {
+                startInfo.ArgumentList.Add(assemblyPath);
+            }
+            startInfo.ArgumentList.Add(InternalWhisperWorker.Switch);
+            startInfo.ArgumentList.Add(requestPath);
+
+            using Process process = new() { StartInfo = startInfo };
+            if (!process.Start())
+            {
+                throw new WhisperRuntimeUnavailableException("Failed to start isolated Whisper worker process.");
+            }
+
+            Task<string> stdoutTask = process.StandardOutput.ReadToEndAsync();
+            Task<string> stderrTask = process.StandardError.ReadToEndAsync();
+            using CancellationTokenRegistration registration = token.Register(() =>
+            {
+                try
+                {
+                    if (!process.HasExited)
+                    {
+                        process.Kill(entireProcessTree: true);
+                    }
+                }
+                catch
+                {
+                    // The parent cancellation token remains authoritative.
+                }
+            });
+
+            using CancellationTokenSource heartbeatCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+            Task heartbeat = LogWorkerHeartbeatAsync(chunkId, model, strategy, stopwatch, process, heartbeatCts.Token);
+
+            try
+            {
+                await process.WaitForExitAsync(token);
+            }
+            finally
+            {
+                heartbeatCts.Cancel();
+                try { await heartbeat; } catch (OperationCanceledException) { }
+            }
+
+            string stdout = await stdoutTask;
+            string stderr = await stderrTask;
+            token.ThrowIfCancellationRequested();
+
+            if (process.ExitCode != 0)
+            {
+                string diagnosis = DiagnoseWorkerBackendFailure(stderr);
+                throw new WhisperRuntimeUnavailableException(
+                    $"Isolated Whisper worker terminated abnormally (exit code {process.ExitCode}) while processing " +
+                    $"chunk {chunkId} with {model}/{strategy}. This is a native/backend failure, not a bad transcription. " +
+                    $"The parent CLI survived and did not checkpoint the chunk." +
+                    (string.IsNullOrWhiteSpace(diagnosis) ? string.Empty : $"\nBackend diagnosis: {diagnosis}") +
+                    $"\nWorker stdout tail:\n{Tail(stdout, 4000)}\n" +
+                    $"Worker stderr/native tail:\n{Tail(stderr, 12000)}");
+            }
+
+            if (!File.Exists(resultPath))
+            {
+                throw new WhisperRuntimeUnavailableException(
+                    $"Isolated Whisper worker exited successfully but produced no result file for chunk {chunkId}.\n" +
+                    $"Worker stdout tail:\n{Tail(stdout, 4000)}\nWorker stderr tail:\n{Tail(stderr, 8000)}");
+            }
+
+            WhisperWorkerResult? result = JsonSerializer.Deserialize<WhisperWorkerResult>(
+                await File.ReadAllTextAsync(resultPath, token), JsonOptions);
+            if (result is null)
+            {
+                throw new WhisperRuntimeUnavailableException(
+                    $"Isolated Whisper worker produced an unreadable result for chunk {chunkId}.");
+            }
+
+            if (!string.IsNullOrWhiteSpace(stderr))
+            {
+                _logger.Debug("Chunk {chunkId} worker diagnostic tail:\n{stderr}", chunkId, Tail(stderr, 6000));
+            }
+            return result;
+        }
+
+        private static bool ShouldForceNvidiaVulkanFirst()
+        {
+            if (!OperatingSystem.IsLinux() || !WhisperRuntimeManager.NvidiaDetected)
+            {
+                return false;
+            }
+
+            string runtime = (WhisperRuntimeManager.RuntimePreference ?? "auto").Trim().ToLowerInvariant();
+
+            // Explicit CPU/CUDA modes must remain explicit. The guard is for Whisper.net's
+            // automatic GPU path where CUDA may fail and Vulkan is the next backend.
+            return runtime is "auto" or "gpu" or "nvidia";
+        }
+
+        private static string[] FindNvidiaVulkanIcdFiles()
+        {
+            if (!OperatingSystem.IsLinux())
+            {
+                return [];
+            }
+
+            string[] directories =
+            [
+                "/usr/share/vulkan/icd.d",
+                "/etc/vulkan/icd.d",
+                "/usr/local/share/vulkan/icd.d",
+                "/usr/lib/x86_64-linux-gnu/GL/vulkan/icd.d",
+                "/usr/lib64/vulkan/icd.d"
+            ];
+
+            foreach (string directory in directories)
+            {
+                if (!Directory.Exists(directory))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    string[] candidates = Directory
+                        .EnumerateFiles(directory, "*.json", SearchOption.TopDirectoryOnly)
+                        .Where(path => Path.GetFileName(path).Contains("nvidia", StringComparison.OrdinalIgnoreCase))
+                        .OrderBy(path =>
+                            Path.GetFileName(path).Equals("nvidia_icd.json", StringComparison.OrdinalIgnoreCase) ? 0 : 1)
+                        .ThenBy(path => path, StringComparer.Ordinal)
+                        .ToArray();
+
+                    if (candidates.Length > 0)
+                    {
+                        // One ICD is sufficient and avoids duplicate physical-device entries
+                        // when the same NVIDIA driver is registered in more than one directory.
+                        return [candidates[0]];
+                    }
+                }
+                catch
+                {
+                    // Continue to the next standard Vulkan ICD directory.
+                }
+            }
+
+            return [];
+        }
+
+        private static string DiagnoseWorkerBackendFailure(string stderr)
+        {
+            if (string.IsNullOrWhiteSpace(stderr))
+            {
+                return string.Empty;
+            }
+
+            List<string> notes = [];
+
+            if (stderr.Contains("Cudart library couldn't be loaded", StringComparison.OrdinalIgnoreCase))
+            {
+                notes.Add("Whisper.net could not load CUDA's libcudart, so auto mode fell through to another backend");
+            }
+
+            string? vulkan0 = stderr
+                .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .LastOrDefault(line => line.Contains("ggml_vulkan:", StringComparison.OrdinalIgnoreCase) &&
+                                       line.Contains("0 =", StringComparison.OrdinalIgnoreCase));
+
+            if (!string.IsNullOrWhiteSpace(vulkan0))
+            {
+                if (vulkan0.Contains("Intel", StringComparison.OrdinalIgnoreCase))
+                {
+                    notes.Add(
+                        "Vulkan device 0 is still Intel; the NVIDIA PRIME Vulkan guard did not take effect. " +
+                        "The NVIDIA Vulkan Optimus layer/ICD should be checked");
+                }
+                else if (vulkan0.Contains("NVIDIA", StringComparison.OrdinalIgnoreCase))
+                {
+                    notes.Add(
+                        "Vulkan device 0 is NVIDIA, so GPU selection is correct; the remaining crash is inside the NVIDIA Vulkan/native backend");
+                }
+            }
+
+            return string.Join("; ", notes);
+        }
+
+        private async Task LogWorkerHeartbeatAsync(
+            string chunkId,
+            GgmlType model,
+            string strategy,
+            Stopwatch stopwatch,
+            Process process,
+            CancellationToken token)
+        {
+            while (!token.IsCancellationRequested && !process.HasExited)
+            {
+                await Task.Delay(TimeSpan.FromSeconds(15), token);
+                if (!process.HasExited)
+                {
+                    _logger.Information(
+                        "Chunk {chunkId}: isolated Whisper worker is still running after {elapsed:0}s ({model}/{strategy}, pid={pid})",
+                        chunkId, stopwatch.Elapsed.TotalSeconds, model, strategy, process.Id);
+                }
+            }
+        }
+
+        private async Task<string> ExtractChunkToStandaloneWaveFileAsync(
+            string normalizedWavPath,
+            TimeSpan start,
+            TimeSpan end,
+            string chunkId,
+            CancellationToken token)
+        {
+            string workingDirectory = Path.Combine(Path.GetTempPath(), "WhisperCLI", "WorkerAudio");
+            Directory.CreateDirectory(workingDirectory);
+            string outputPath = Path.Combine(workingDirectory, $"{chunkId}-{Guid.NewGuid():N}.wav");
+            string ffmpegPath = Path.Combine(
+                FFmpeg.ExecutablesPath,
+                OperatingSystem.IsWindows() ? "ffmpeg.exe" : "ffmpeg");
+
+            ProcessStartInfo startInfo = new()
+            {
+                FileName = ffmpegPath,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardError = true
+            };
+            startInfo.ArgumentList.Add("-hide_banner");
+            startInfo.ArgumentList.Add("-nostdin");
+            startInfo.ArgumentList.Add("-y");
+            // Input-side seeking is exact for the normalized PCM WAV and avoids decoding from
+            // 00:00 for every late-file chunk.
+            startInfo.ArgumentList.Add("-ss");
+            startInfo.ArgumentList.Add(start.TotalSeconds.ToString("0.000", CultureInfo.InvariantCulture));
+            startInfo.ArgumentList.Add("-i");
+            startInfo.ArgumentList.Add(normalizedWavPath);
+            startInfo.ArgumentList.Add("-t");
+            startInfo.ArgumentList.Add((end - start).TotalSeconds.ToString("0.000", CultureInfo.InvariantCulture));
+            startInfo.ArgumentList.Add("-map");
+            startInfo.ArgumentList.Add("0:a:0");
+            startInfo.ArgumentList.Add("-ac");
+            startInfo.ArgumentList.Add("1");
+            startInfo.ArgumentList.Add("-ar");
+            startInfo.ArgumentList.Add("16000");
+            startInfo.ArgumentList.Add("-c:a");
+            startInfo.ArgumentList.Add("pcm_s16le");
+            startInfo.ArgumentList.Add("-f");
+            startInfo.ArgumentList.Add("wav");
+            startInfo.ArgumentList.Add(outputPath);
+
+            try
+            {
+                using Process process = new() { StartInfo = startInfo };
+                if (!process.Start())
+                {
+                    throw new InvalidOperationException("Failed to start FFmpeg chunk extraction.");
+                }
+
+                Task<string> stderrTask = process.StandardError.ReadToEndAsync();
+                using CancellationTokenRegistration registration = token.Register(() =>
+                {
+                    try { if (!process.HasExited) process.Kill(entireProcessTree: true); } catch { }
+                });
+                await process.WaitForExitAsync(token);
+                string stderr = await stderrTask;
+                if (process.ExitCode != 0)
+                {
+                    throw new InvalidOperationException(
+                        $"FFmpeg failed to extract chunk {chunkId} (exit code {process.ExitCode}).\n{Tail(stderr, 8000)}");
+                }
+
+                FileInfo file = new(outputPath);
+                file.Refresh();
+                if (!file.Exists || file.Length <= 44)
+                {
+                    throw new InvalidOperationException(
+                        $"FFmpeg produced an empty/invalid WAV for chunk {chunkId} at '{outputPath}'.");
+                }
+
+                // Validate the exact stream that will cross the native boundary. A malformed or
+                // header-only WAV can cause whisper.cpp to fail below managed exception handling.
+                using (var reader = new WaveFileReader(outputPath))
+                {
+                    WaveFormat format = reader.WaveFormat;
+                    if (format.SampleRate != 16000 || format.Channels != 1 ||
+                        format.BitsPerSample != 16 || format.Encoding != WaveFormatEncoding.Pcm)
+                    {
+                        throw new InvalidOperationException(
+                            $"Chunk {chunkId} WAV has unexpected format: {format}. Expected 16 kHz mono PCM16.");
+                    }
+
+                    if (reader.TotalTime < TimeSpan.FromMilliseconds(250))
+                    {
+                        throw new InvalidOperationException(
+                            $"Chunk {chunkId} WAV contains too little audio ({reader.TotalTime.TotalMilliseconds:0} ms).");
+                    }
+
+                    double durationDelta = Math.Abs((reader.TotalTime - (end - start)).TotalSeconds);
+                    if (durationDelta > 1.0)
+                    {
+                        throw new InvalidOperationException(
+                            $"Chunk {chunkId} WAV duration mismatch: expected {(end - start).TotalSeconds:0.000}s, " +
+                            $"got {reader.TotalTime.TotalSeconds:0.000}s.");
+                    }
+
+                    _logger.Debug(
+                        "Chunk {chunkId}: standalone WAV validated: {bytes} bytes, {duration:0.000}s, {format}",
+                        chunkId, file.Length, reader.TotalTime.TotalSeconds, format);
+                }
+
+                return outputPath;
+            }
+            catch
+            {
+                TryDelete(outputPath);
+                throw;
             }
         }
 
@@ -1105,7 +1540,7 @@ namespace WhisperCLI.Transcribers
         private static string BuildFingerprint(AppOptions options, IReadOnlyList<GgmlType> fallbackModels, bool usedVad)
         {
             string raw = string.Join("|",
-                "robust-v3",
+                "robust-v9-isolated-native-worker",
                 options.Model,
                 string.Join(",", fallbackModels),
                 options.Language,
@@ -1113,7 +1548,6 @@ namespace WhisperCLI.Transcribers
                 usedVad,
                 options.ChunkSeconds,
                 options.MaxChunkSeconds,
-                options.MaxContextTokens,
                 options.EntropyThreshold,
                 options.Temperature,
                 options.TemperatureIncrement,
@@ -1153,7 +1587,7 @@ namespace WhisperCLI.Transcribers
                 string json = await File.ReadAllTextAsync(path, token);
                 TranscriptionCheckpoint? checkpoint = JsonSerializer.Deserialize<TranscriptionCheckpoint>(json, JsonOptions);
                 bool matches = checkpoint is not null &&
-                               checkpoint.SchemaVersion == "3" &&
+                               checkpoint.SchemaVersion == "6" &&
                                checkpoint.InputLength == inputFile.Length &&
                                checkpoint.InputLastWriteUtc == inputFile.LastWriteTimeUtc &&
                                checkpoint.Fingerprint == fingerprint;
@@ -1164,7 +1598,14 @@ namespace WhisperCLI.Transcribers
                     return checkpoint!;
                 }
 
-                _logger.Information("Existing checkpoint does not match the current input/options and will not be reused");
+                if (checkpoint is not null && checkpoint.SchemaVersion != "6")
+                {
+                    _logger.Warning("Ignoring checkpoint schema {schema}; v10 uses schema 6 because Linux hybrid-GPU backend selection changed and older worker results are unsafe to reuse.", checkpoint.SchemaVersion);
+                }
+                else
+                {
+                    _logger.Information("Existing checkpoint does not match the current input/options and will not be reused");
+                }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -1176,7 +1617,31 @@ namespace WhisperCLI.Transcribers
 
         private static ChunkTranscriptionResult? FindCachedChunk(TranscriptionCheckpoint checkpoint, AudioChunk chunk)
         {
-            return checkpoint.CompletedChunks.FirstOrDefault(c => SameChunk(c.Chunk, chunk));
+            return checkpoint.CompletedChunks.FirstOrDefault(c =>
+                SameChunk(c.Chunk, chunk) && IsReusableCachedChunk(c));
+        }
+
+        private static bool IsReusableCachedChunk(ChunkTranscriptionResult result)
+        {
+            // A checkpoint entry created from an infrastructure exception is never valid
+            // transcription work. Schema 5 invalidates older unsafe checkpoints globally, but keep this
+            // guard so a future transient backend failure cannot poison a resumable run.
+            if (ContainsAttemptError(result))
+            {
+                return false;
+            }
+
+            return true;
+        }
+
+        private static bool ContainsAttemptError(ChunkTranscriptionResult result)
+        {
+            if (result.Attempts.Any(a => !string.IsNullOrWhiteSpace(a.Error)))
+            {
+                return true;
+            }
+
+            return result.SubChunks.Any(ContainsAttemptError);
         }
 
         private static bool SameChunk(AudioChunk a, AudioChunk b)
@@ -1449,59 +1914,32 @@ namespace WhisperCLI.Transcribers
             }
         }
 
-        private sealed class ModelFactoryCache : IDisposable
+        private sealed class ModelFileCache
         {
             private readonly Func<GgmlType, CancellationToken, Task<FileInfo>> _resolver;
-            private readonly ILogger _logger;
-            private readonly AppOptions _options;
-            private GgmlType? _loadedModel;
-            private WhisperFactory? _factory;
+            private readonly Dictionary<GgmlType, FileInfo> _files = [];
 
-            public ModelFactoryCache(
-                Func<GgmlType, CancellationToken, Task<FileInfo>> resolver,
-                ILogger logger,
-                AppOptions options)
+            public ModelFileCache(Func<GgmlType, CancellationToken, Task<FileInfo>> resolver)
             {
                 _resolver = resolver;
-                _logger = logger;
-                _options = options;
             }
 
-            public async Task<WhisperFactory> GetAsync(GgmlType model, CancellationToken token)
+            public async Task<FileInfo> GetAsync(GgmlType model, CancellationToken token)
             {
-                if (_factory is not null && _loadedModel == model)
+                if (_files.TryGetValue(model, out FileInfo? file) && file.Exists)
                 {
-                    return _factory;
+                    return file;
                 }
 
-                // Resolve/download the next model file before releasing the currently loaded
-                // model. Downloading does not consume GPU VRAM, and this avoids throwing away
-                // a healthy primary model merely because a fallback download failed.
-                FileInfo modelFile = await _resolver(model, token);
+                FileInfo resolved = await _resolver(model, token);
                 token.ThrowIfCancellationRequested();
-
-                if (_factory is not null)
+                resolved.Refresh();
+                if (!resolved.Exists || resolved.Length == 0)
                 {
-                    _logger.Information(
-                        "Unloading Whisper model {previousModel} before switching to {model} (prevents multi-Large-model VRAM exhaustion)",
-                        _loadedModel, model);
-                    _factory.Dispose();
-                    _factory = null;
-                    _loadedModel = null;
+                    throw new FileNotFoundException($"Whisper model '{model}' was not resolved to a valid file.", resolved.FullName);
                 }
-
-                _logger.Information("Loading Whisper model: {model}", model);
-                _factory = WhisperRuntimeManager.CreateFactory(modelFile.FullName, _options);
-                WhisperRuntimeManager.ValidateLoadedRuntime(_logger);
-                _loadedModel = model;
-                return _factory;
-            }
-
-            public void Dispose()
-            {
-                _factory?.Dispose();
-                _factory = null;
-                _loadedModel = null;
+                _files[model] = resolved;
+                return resolved;
             }
         }
     }

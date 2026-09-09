@@ -8,6 +8,7 @@ namespace WhisperCLI;
 internal sealed class WhisperRuntimeUnavailableException : InvalidOperationException
 {
     public WhisperRuntimeUnavailableException(string message) : base(message) { }
+    public WhisperRuntimeUnavailableException(string message, Exception innerException) : base(message, innerException) { }
 }
 
 internal static class WhisperRuntimeManager
@@ -15,6 +16,8 @@ internal static class WhisperRuntimeManager
     private static readonly object Sync = new();
     private static bool _configured;
     private static bool _runtimeLogged;
+    private static readonly Queue<string> NativeLogRing = new();
+    private const int NativeLogRingCapacity = 120;
 
     public static bool NvidiaDetected { get; private set; }
     public static bool RequireGpu { get; private set; }
@@ -22,6 +25,24 @@ internal static class WhisperRuntimeManager
     public static string RuntimePreference { get; private set; } = "auto";
     public static string? NvidiaDescription { get; private set; }
     public static string NvidiaDetectionMethod { get; private set; } = "none";
+
+    public static void ObserveNativeLog(string level, string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return;
+        }
+
+        string line = $"[{level.ToUpperInvariant()}] {text.Trim()}";
+        lock (Sync)
+        {
+            NativeLogRing.Enqueue(line);
+            while (NativeLogRing.Count > NativeLogRingCapacity)
+            {
+                NativeLogRing.Dequeue();
+            }
+        }
+    }
 
     public static void Configure(AppOptions options, ILogger logger)
     {
@@ -43,23 +64,36 @@ internal static class WhisperRuntimeManager
             switch (requested)
             {
                 case "auto":
-                    // IMPORTANT: preserve Whisper.net 1.8.1's original runtime selection exactly.
-                    // The user's original application called WhisperFactory.FromPath(path) with
-                    // default options and successfully used this GPU. Do not override the default
-                    // RuntimeLibraryOrder here. In 1.8.1 it starts with RuntimeLibrary.Cuda.
+                    // CRITICAL: this is intentionally identical to the original application.
+                    // Do not touch RuntimeOptions.RuntimeLibraryOrder in auto mode. The user's
+                    // original program simply called WhisperFactory.FromPath(path), and that
+                    // automatic native-runtime selection is the compatibility baseline.
                     UseGpu = true;
                     RequireGpu = NvidiaDetected;
                     break;
 
                 case "gpu":
                 case "nvidia":
+                    // Keep Whisper.net's own default GPU/runtime selection, but require that the
+                    // selected runtime is GPU-capable. This is intentionally different from
+                    // --runtime cuda, which really forces CUDA only.
+                    UseGpu = true;
+                    RequireGpu = true;
+                    break;
+
                 case "cuda":
                 case "cuda12":
-                    // Whisper.net 1.8.1 exposes one CUDA runtime, built against CUDA 12.x
-                    // (documented minimum Toolkit 12.1). `cuda12` is therefore an alias.
+                    // Explicit opt-in only. Whisper.net 1.8.1 exposes one CUDA runtime, built
+                    // against CUDA 12.x. Do not force this path for --runtime auto.
                     UseGpu = true;
                     RequireGpu = true;
                     RuntimeOptions.RuntimeLibraryOrder = [RuntimeLibrary.Cuda];
+                    break;
+
+                case "vulkan":
+                    UseGpu = true;
+                    RequireGpu = true;
+                    RuntimeOptions.RuntimeLibraryOrder = [RuntimeLibrary.Vulkan];
                     break;
 
                 case "cpu":
@@ -80,7 +114,7 @@ internal static class WhisperRuntimeManager
 
                 default:
                     throw new ArgumentException(
-                        $"Unknown Whisper runtime '{options.Runtime}'. Use auto, gpu, cuda, cuda12, or cpu.",
+                        $"Unknown Whisper runtime '{options.Runtime}'. Use auto, gpu, cuda, cuda12, vulkan, or cpu.",
                         nameof(options.Runtime));
             }
 
@@ -101,12 +135,18 @@ internal static class WhisperRuntimeManager
                     "No NVIDIA GPU was detected by nvidia-smi, /dev/nvidia*, or /proc/driver/nvidia. Runtime auto may use CPU.");
             }
 
+
             logger.Information(
                 "Whisper runtime preference: {runtime}; compatibility package=Whisper.net 1.8.1; GPU device={gpuDevice}; GPU required={requireGpu}; runtime order={order}",
                 RuntimePreference,
                 options.GpuDevice,
                 RequireGpu,
                 string.Join(" -> ", RuntimeOptions.RuntimeLibraryOrder));
+
+            if (RuntimePreference == "auto")
+            {
+                logger.Information("Runtime auto compatibility mode: Whisper.net RuntimeLibraryOrder was left untouched (same selection path as the original application).");
+            }
         }
     }
 
@@ -141,7 +181,8 @@ internal static class WhisperRuntimeManager
             return;
         }
 
-        bool gpuLoaded = IsGpuRuntime(loaded.Value);
+        bool gpuLoaded = loaded.Value == RuntimeLibrary.Cuda ||
+                         loaded.Value == RuntimeLibrary.Vulkan;
 
         lock (Sync)
         {
@@ -151,7 +192,7 @@ internal static class WhisperRuntimeManager
                 logger.Information(
                     "Whisper native runtime loaded: {runtime}; GPU acceleration active={gpuActive}",
                     loaded,
-                    IsGpuRuntime(loaded.Value) && UseGpu);
+                    gpuLoaded && UseGpu);
                 logger.Information(
                     "Whisper.net compatibility runtime verification: LoadedLibrary={runtime} (1.8.1).",
                     loaded);
@@ -160,19 +201,33 @@ internal static class WhisperRuntimeManager
 
         if (RequireGpu && (!gpuLoaded || !UseGpu))
         {
+            DumpNativeLoaderDiagnostics(logger);
             throw new WhisperRuntimeUnavailableException(
-                $"An NVIDIA GPU was requested/detected, but Whisper.net 1.8.1 loaded '{loaded}', which is not a GPU runtime for this configuration. " +
-                "In auto mode both CUDA and Vulkan are accepted as GPU backends. " +
-                "Run with -v to see the native-loader diagnostics, or use --runtime cpu only if CPU inference is intentional.");
+                $"GPU acceleration was requested, but Whisper.net 1.8.1 loaded '{loaded}', which this build does not classify as a GPU backend. " +
+                "In --runtime auto mode the compatibility build deliberately preserves Whisper.net's original runtime selection instead of forcing CUDA. " +
+                "Use --runtime cuda only when you explicitly want CUDA-only loading.");
         }
     }
 
-    private static bool IsGpuRuntime(RuntimeLibrary runtime)
+    public static void DumpNativeLoaderDiagnostics(ILogger logger)
     {
-        // In Whisper.net 1.8.1 both CUDA and Vulkan are ggml GPU backends.
-        // The original application used the default runtime order (Cuda -> Vulkan -> ...),
-        // so rejecting Vulkan here would incorrectly abort a valid GPU path.
-        return runtime is RuntimeLibrary.Cuda or RuntimeLibrary.Vulkan;
+        string[] snapshot;
+        lock (Sync)
+        {
+            snapshot = NativeLogRing.ToArray();
+        }
+
+        if (snapshot.Length == 0)
+        {
+            logger.Warning("No Whisper native-loader diagnostic lines were captured.");
+            return;
+        }
+
+        logger.Warning("Whisper native-loader diagnostics (most recent {count} lines):", snapshot.Length);
+        foreach (string line in snapshot)
+        {
+            logger.Warning("[Whisper native] {line}", line);
+        }
     }
 
     private static NvidiaProbe ProbeNvidia()

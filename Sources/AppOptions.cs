@@ -21,11 +21,11 @@ namespace WhisperCLI
         public string FallbackModels { get; set; } = "auto";
 
         [Option("runtime", Required = false, Default = "auto",
-            HelpText = "Whisper native runtime: auto, gpu, cuda, cuda12, or cpu. This build intentionally uses Whisper.net 1.8.1 to preserve the CUDA 12.1+ runtime that worked in the original application. cuda12 is an alias for cuda.")]
+            HelpText = "Whisper native runtime: auto, gpu, cuda, cuda12, vulkan, or cpu. 'auto' preserves Whisper.net 1.8.1's original runtime selection exactly; cuda12 is an alias for cuda.")]
         public string Runtime { get; set; } = "auto";
 
         [Option("gpu-device", Required = false, Default = 0,
-            HelpText = "GPU device index passed to Whisper. Default: 0.")]
+            HelpText = "GPU device index passed to Whisper where the native backend honors it. Whisper.net 1.8.1 Vulkan may ignore this; Linux NVIDIA auto mode uses PRIME Vulkan selection instead. Default: 0.")]
         public int GpuDevice { get; set; } = 0;
 
         [Option("use-vad", Required = false, Default = true,
@@ -42,7 +42,7 @@ namespace WhisperCLI
         public int MaxChunkSeconds { get; set; } = 90;
 
         [Option("max-context-tokens", Required = false, Default = 64,
-            HelpText = "Maximum previous-text context tokens for the primary pass. Recovery passes disable previous-text context. Default: 64.")]
+            HelpText = "Compatibility option retained for existing commands. v9 deliberately leaves the primary decoder context at Whisper.net's original default; recovery passes disable context.")]
         public int MaxContextTokens { get; set; } = 64;
 
         [Option("entropy-threshold", Required = false, Default = 2.7f,
