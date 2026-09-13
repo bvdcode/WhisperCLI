@@ -1,0 +1,139 @@
+using System.Reflection;
+using System.Text.Json;
+using Serilog;
+using Whisper.net.Ggml;
+using WhisperCLI;
+using WhisperCLI.Transcribers;
+using WhisperCLI.Transcribers.Robust;
+
+// No model, GPU, FFmpeg or real audio is used. A native/model resolver call fails the test.
+var jsonOptions = new JsonSerializerOptions { WriteIndented = true, PropertyNameCaseInsensitive = true };
+var root = Path.Combine(Path.GetTempPath(), "WhisperCLI-checkpoint-tests-" + Guid.NewGuid().ToString("N"));
+Directory.CreateDirectory(root);
+int checks = 0;
+void Check(bool condition, string name)
+{
+    if (!condition) throw new Exception("FAIL: " + name);
+    checks++;
+    Console.WriteLine("PASS: " + name);
+}
+T Clone<T>(T value) => JsonSerializer.Deserialize<T>(JsonSerializer.Serialize(value, jsonOptions), jsonOptions)!;
+ChunkTranscriptionResult MakeChunk(string id, double start, double end, bool review = false) => new()
+{
+    Chunk = new() { Id = id, Start = TimeSpan.FromSeconds(start), End = TimeSpan.FromSeconds(end), ExpectedSpeech = true },
+    SelectedModel = "LargeV3", SelectedStrategy = "primary-limited-context", NeedsReview = review,
+    Quality = new() { Score = review ? 1 : 0, Suspicious = review },
+    Segments = [new() { Start = TimeSpan.FromSeconds(start), End = TimeSpan.FromSeconds(end), Text = "Different words describe this interval clearly.", Language = "en" }],
+    Attempts = [new() { Model = "LargeV3", Strategy = "primary-limited-context" }]
+};
+string Fingerprint(AppOptions options, bool usedVad = true)
+{
+    var method = typeof(FileTranscriber).GetMethod("BuildFingerprint", BindingFlags.NonPublic | BindingFlags.Static)!;
+    return (string)method.Invoke(null, [options, new List<GgmlType> { GgmlType.LargeV3Turbo, GgmlType.LargeV2 }, usedVad])!;
+}
+try
+{
+    var good = MakeChunk("0001", 0, 10);
+    var review = MakeChunk("0002", 10, 20, true);
+    review.SelectedStrategy = "recursive-split-recovery";
+    review.SubChunks = Enumerable.Range(0, 4).Select(i => MakeChunk("0002." + i, 10 + 2.5*i, 12.5 + 2.5*i)).ToList();
+    foreach (var child in review.SubChunks) child.Segments[0].Text = "Thank you";
+    review.Segments = review.SubChunks.SelectMany(c => c.Segments).ToList();
+    Check(CheckpointReusePolicy.IsTerminal(good), "accepted result is terminal");
+    Check(CheckpointReusePolicy.IsTerminal(review), "exhausted recursive result is still terminal");
+    Check(CheckpointReusePolicy.NeedsReview(review), "review flag is preserved");
+    Check(CheckpointReusePolicy.CoversWholeAudio([good, review], TimeSpan.FromSeconds(20)), "full timeline including review is covered");
+    Check(!CheckpointReusePolicy.CoversWholeAudio([review], TimeSpan.FromSeconds(20)), "missing prefix is incomplete");
+    Check(!CheckpointReusePolicy.CoversWholeAudio([good], TimeSpan.FromSeconds(20)), "missing tail is incomplete");
+    Check(!CheckpointReusePolicy.CoversWholeAudio([good, good, review], TimeSpan.FromSeconds(20)), "duplicate/overlap is incomplete");
+    var error = Clone(review); error.SubChunks[0].Attempts[0].Error = "native runtime failure";
+    Check(!CheckpointReusePolicy.IsTerminal(error), "native failure in a descendant is not reusable");
+    var brokenTree = Clone(review); brokenTree.SubChunks.RemoveAt(1);
+    Check(!CheckpointReusePolicy.IsTerminal(brokenTree), "missing recursive child is not terminal");
+    var inherited = Clone(review); inherited.NeedsReview = false; inherited.Quality.Suspicious = false; inherited.SubChunks[0].NeedsReview = true;
+    Check(CheckpointReusePolicy.PropagateReviewFlags(inherited) && inherited.NeedsReview, "descendant review propagates to parent");
+
+    var inputPath = Path.Combine(root, "Лекция №4.mp4");
+    await File.WriteAllTextAsync(inputPath, "not real audio: cache tests must never decode this");
+    File.SetLastWriteTimeUtc(inputPath, DateTime.UtcNow.AddDays(-1));
+    var input = new FileInfo(inputPath);
+    var options = new AppOptions { Model = GgmlType.LargeV3, DelaySeconds = 0, CopyToClipboardOption = false };
+    var cp = new TranscriptionCheckpoint
+    {
+        InputPath = input.FullName, InputLength = input.Length, InputLastWriteUtc = input.LastWriteTimeUtc,
+        Fingerprint = Fingerprint(options), UpdatedUtc = DateTime.UtcNow,
+        CompletedChunks = [good, review]
+    };
+    var report = new TranscriptionRunReport
+    {
+        InputPath = input.FullName, PrimaryModel = "LargeV3", FallbackModels = ["LargeV3Turbo", "LargeV2"],
+        RequestedLanguage = "auto", LockedDetectedLanguage = "en", UsedVad = true,
+        StartedUtc = DateTime.UtcNow.AddMinutes(-5), CompletedUtc = DateTime.UtcNow,
+        AudioDuration = TimeSpan.FromSeconds(20), NeedsReview = true, Chunks = [Clone(good), Clone(review)]
+    };
+    string stem = Path.Combine(root, "Лекция №4.LargeV3");
+    string cpPath = stem + ".transcription.checkpoint.json";
+    string reportPath = stem + ".transcription.json";
+    async Task Save<T>(string path, T value) => await File.WriteAllTextAsync(path, JsonSerializer.Serialize(value, jsonOptions));
+    await Save(cpPath, cp); await Save(reportPath, report); // legacy-style report lacks identity fields
+    using var logger = new LoggerConfiguration().CreateLogger();
+    int modelCalls = 0;
+    var transcriber = new FileTranscriber(logger, (_, _) => { modelCalls++; throw new Exception("Model must not load on cache hit"); });
+    FileInfo result = await transcriber.TranscribeRobustAsync(input, options, CancellationToken.None);
+    Check(result.Exists && modelCalls == 0, "completed v15 result regenerates missing outputs without inference");
+    Check(File.Exists(stem + ".transcription.review.txt"), "review file exists for exhausted results");
+    var reviewText = await File.ReadAllTextAsync(stem + ".transcription.review.txt");
+    Check(reviewText.Contains("00:00:10.000"), "parent-only quality failure is listed in review output");
+    var files = Directory.GetFiles(root).ToDictionary(p => p, p => (Bytes: File.ReadAllBytes(p), Modified: File.GetLastWriteTimeUtc(p)));
+    await transcriber.TranscribeRobustAsync(new FileInfo(inputPath), options, CancellationToken.None);
+    Check(modelCalls == 0, "second identical run does zero inference");
+    Check(files.All(kv => kv.Value.Bytes.SequenceEqual(File.ReadAllBytes(kv.Key)) && kv.Value.Modified == File.GetLastWriteTimeUtc(kv.Key)),
+        "second identical run leaves output bytes and mtimes unchanged");
+
+    // Reproduce v15 removing a terminal review entry on startup, then being interrupted.
+    var partial = Clone(cp); partial.CompletedChunks = [Clone(good)]; partial.UpdatedUtc = DateTime.UtcNow;
+    await Save(cpPath, partial);
+    await transcriber.TranscribeRobustAsync(new FileInfo(inputPath), options, CancellationToken.None);
+    var recovered = JsonSerializer.Deserialize<TranscriptionCheckpoint>(await File.ReadAllTextAsync(cpPath), jsonOptions)!;
+    Check(recovered.CompletedChunks.Count == 2 && recovered.CompletedChunks[1].NeedsReview && modelCalls == 0,
+        "matching completed report restores entries removed by v15 without decoding");
+    Check(File.Exists(cpPath + ".pre-v16.bak"), "pre-recovery checkpoint is backed up");
+
+    var loader = typeof(FileTranscriber).GetMethod("LoadCheckpointAsync", BindingFlags.NonPublic | BindingFlags.Instance)!;
+    async Task<TranscriptionCheckpoint> Load(AppOptions args) => await (Task<TranscriptionCheckpoint>)loader.Invoke(
+        transcriber, [cpPath, Path.Combine(root, "missing-legacy.json"), new FileInfo(inputPath), Fingerprint(args), args, CancellationToken.None])!;
+    await Save(cpPath, cp);
+    var kept = await Load(options);
+    Check(kept.CompletedChunks.Count == 2 && kept.CompletedChunks[1].NeedsReview, "ordinary incomplete-run resume retains terminal review outcomes");
+    var retry = new AppOptions { Model = GgmlType.LargeV3, RetryReview = true };
+    await Save(cpPath, cp);
+    var retried = await Load(retry);
+    Check(retried.CompletedChunks.Count == 1 && retried.CompletedChunks[0].Chunk.Id == "0001", "--retry-review invalidates only review-marked work");
+    await Save(cpPath, cp);
+    var revalidate = new AppOptions { Model = GgmlType.LargeV3, RevalidateCheckpoint = true };
+    var revalidated = await Load(revalidate);
+    Check(revalidated.CompletedChunks.Count == 1, "explicit revalidation rejects the repeated merged parent");
+    var bad = Clone(cp); bad.CompletedChunks[1] = error; await Save(cpPath, bad);
+    var withoutError = await Load(options);
+    Check(withoutError.CompletedChunks.Count == 1, "backend failures are excluded even in ordinary resume");
+
+    var fast = typeof(FileTranscriber).GetMethod("TryReuseCompletedRunAsync", BindingFlags.NonPublic | BindingFlags.Instance)!;
+    async Task<FileInfo?> Fast(AppOptions args) => await (Task<FileInfo?>)fast.Invoke(transcriber,
+        [new FileInfo(inputPath), args, new List<GgmlType> { GgmlType.LargeV3Turbo, GgmlType.LargeV2 }, CancellationToken.None])!;
+    await Save(cpPath, cp);
+    Check(await Fast(new AppOptions { Model = GgmlType.LargeV3, ResumeOption = false }) is null, "--resume false bypasses completed cache");
+    Check(await Fast(retry) is null, "--retry-review bypasses completed fast path");
+    Check(await Fast(revalidate) is null, "--revalidate-checkpoint bypasses completed fast path");
+    Check(await Fast(new AppOptions { Model = GgmlType.LargeV3, Language = "ru" }) is null, "changed language rejects old fingerprint");
+    Check(await Fast(new AppOptions { Model = GgmlType.LargeV3, UseVadOption = false }) is null, "disabled boundary detector rejects a VAD-based cache");
+    Check(await Fast(new AppOptions { Model = GgmlType.LargeV2 }) is null, "another primary model cannot reuse this namespace");
+    var newer = Clone(cp); newer.CompletedChunks[0].Segments[0].Text = "A newer explicitly repaired result"; await Save(cpPath, newer);
+    Check(await Fast(options) is null, "completed report cannot roll back a newer checkpoint result");
+    await Save(cpPath, cp); await File.AppendAllTextAsync(inputPath, " changed");
+    Check(await Fast(options) is null, "changed input rejects completed cache");
+    Console.WriteLine($"All {checks} checkpoint regression checks passed; no GPU/inference was used.");
+}
+finally
+{
+    Directory.Delete(root, recursive: true);
+}

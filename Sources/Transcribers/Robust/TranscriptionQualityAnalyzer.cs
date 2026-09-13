@@ -30,13 +30,16 @@ public static class TranscriptionQualityAnalyzer
 
         // Look specifically at the tail. Whisper loops usually become highly periodic
         // and then continue indefinitely; aborting here saves most of the wasted decode.
-        int maxPhrase = Math.Min(12, words.Count / 4);
+        // Long-cycle loops are common with Whisper: the repeated unit can be a full
+        // sentence (15-30+ words), not just a short phrase. v13 capped this at 12 words
+        // and therefore missed loops such as an 18-word sentence repeated nine times.
+        int maxPhrase = Math.Min(48, words.Count / 3);
         for (int phraseLength = 1; phraseLength <= maxPhrase; phraseLength++)
         {
-            // Four repeated multi-word phrases are already highly suspicious. A single
-            // repeated word ("yes yes yes...") needs a stronger signal to avoid aborting
-            // legitimate emphatic speech/laughter.
-            int repetitions = phraseLength == 1 ? 6 : 4;
+            // Be conservative for tiny phrases, but abort after three exact repeats of
+            // a longer phrase. Exact 4+ word triples are extraordinarily unlikely to be
+            // useful speech and are exactly how the decoder runaway manifests.
+            int repetitions = phraseLength == 1 ? 6 : phraseLength <= 3 ? 4 : 3;
             int needed = phraseLength * repetitions;
             if (needed > words.Count)
             {
@@ -83,7 +86,9 @@ public static class TranscriptionQualityAnalyzer
             .Where(s => !string.IsNullOrWhiteSpace(s))
             .ToList();
 
-        assessment.MaxConsecutiveDuplicateSegments = MaxConsecutiveDuplicates(normalizedSegments);
+        var duplicateSegments = FindStrongestConsecutiveDuplicateSegments(normalizedSegments);
+        assessment.MaxConsecutiveDuplicateSegments = duplicateSegments.Count;
+        assessment.MaxConsecutiveDuplicateSegmentWords = duplicateSegments.WordCount;
 
         var repeat = FindStrongestConsecutivePhraseLoop(words);
         assessment.LongestRepeatedPhraseWords = repeat.PhraseLength;
@@ -118,6 +123,30 @@ public static class TranscriptionQualityAnalyzer
             strongSignal = true;
             assessment.Reasons.Add($"same segment repeated {assessment.MaxConsecutiveDuplicateSegments} times consecutively");
         }
+        else if (assessment.MaxConsecutiveDuplicateSegments == 2)
+        {
+            // Two identical long segments are already a strong decoder-hallucination
+            // signature. For shorter 4-7 word segments, combine this with the phrase
+            // concentration signal below before rejecting. Preserve short natural speech
+            // such as "yes, yes" or "good morning".
+            if (assessment.MaxConsecutiveDuplicateSegmentWords >= 8)
+            {
+                score += 0.75;
+                strongSignal = true;
+                assessment.Reasons.Add($"long segment ({assessment.MaxConsecutiveDuplicateSegmentWords} words) repeated twice consecutively");
+            }
+            else if (assessment.MaxConsecutiveDuplicateSegmentWords >= 4)
+            {
+                score += 0.55;
+                assessment.Reasons.Add($"segment ({assessment.MaxConsecutiveDuplicateSegmentWords} words) repeated twice consecutively");
+            }
+            else if (assessment.MaxConsecutiveDuplicateSegmentWords >= 3 && words.Count <= 20)
+            {
+                score += 0.65;
+                strongSignal = true;
+                assessment.Reasons.Add($"short chunk dominated by a {assessment.MaxConsecutiveDuplicateSegmentWords}-word segment repeated twice");
+            }
+        }
 
         if (repeat.Repetitions >= 4 && repeat.PhraseLength >= 1)
         {
@@ -127,8 +156,20 @@ public static class TranscriptionQualityAnalyzer
         }
         else if (repeat.Repetitions >= 3 && repeat.PhraseLength >= 4)
         {
-            score += 0.60;
+            score += 0.65;
+            strongSignal = true;
             assessment.Reasons.Add($"{repeat.PhraseLength}-word phrase repeated {repeat.Repetitions} times consecutively");
+        }
+        else if (repeat.Repetitions == 2 && repeat.PhraseLength >= 8)
+        {
+            score += 0.70;
+            strongSignal = true;
+            assessment.Reasons.Add($"long {repeat.PhraseLength}-word phrase repeated twice consecutively");
+        }
+        else if (repeat.Repetitions == 2 && repeat.PhraseLength >= 4 && assessment.RepeatedTokenFraction >= 0.20)
+        {
+            score += 0.30;
+            assessment.Reasons.Add($"{repeat.PhraseLength}-word phrase repeated twice consecutively");
         }
 
         if (assessment.RepeatedTokenFraction >= 0.60)
@@ -142,7 +183,16 @@ public static class TranscriptionQualityAnalyzer
             assessment.Reasons.Add($"high repetition concentration ({assessment.RepeatedTokenFraction:P0})");
         }
 
-        if (words.Count >= 50 && assessment.UniqueBigramRatio < 0.22)
+        if (words.Count >= 80 && assessment.UniqueBigramRatio < 0.15)
+        {
+            // Backstop for long sentence-cycle hallucinations even if their exact token
+            // boundaries evade the phrase-loop finder. On the supplied 90-minute sample,
+            // the only accepted chunk below this threshold was the missed 18-word loop.
+            score += 0.70;
+            strongSignal = true;
+            assessment.Reasons.Add($"extremely low lexical transition diversity (unique bigrams {assessment.UniqueBigramRatio:P0})");
+        }
+        else if (words.Count >= 50 && assessment.UniqueBigramRatio < 0.22)
         {
             score += 0.30;
             assessment.Reasons.Add($"very low lexical transition diversity (unique bigrams {assessment.UniqueBigramRatio:P0})");
@@ -195,28 +245,35 @@ public static class TranscriptionQualityAnalyzer
         return (double)bigrams.Count / (words.Count - 1);
     }
 
-    private static int MaxConsecutiveDuplicates(IReadOnlyList<string> values)
+    private static (int Count, int WordCount) FindStrongestConsecutiveDuplicateSegments(IReadOnlyList<string> values)
     {
         if (values.Count == 0)
         {
-            return 0;
+            return (0, 0);
         }
 
-        int best = 1;
+        int bestCount = 1;
+        int bestWords = Tokenize(values[0]).Count;
         int current = 1;
         for (int i = 1; i < values.Count; i++)
         {
             if (values[i] == values[i - 1])
             {
                 current++;
-                best = Math.Max(best, current);
             }
             else
             {
                 current = 1;
             }
+
+            int currentWords = Tokenize(values[i]).Count;
+            if (current > bestCount || (current == bestCount && currentWords > bestWords))
+            {
+                bestCount = current;
+                bestWords = currentWords;
+            }
         }
-        return best;
+        return (bestCount, bestWords);
     }
 
     private static (int PhraseLength, int Repetitions, int DuplicateTokens) FindStrongestConsecutivePhraseLoop(IReadOnlyList<string> words)
@@ -225,10 +282,12 @@ public static class TranscriptionQualityAnalyzer
         int bestRepetitions = 0;
         int bestDuplicateTokens = 0;
 
-        int maxPhraseLength = Math.Min(12, words.Count / 3);
+        // Search full-sentence cycles as well as short phrases. Chunks are small enough
+        // that a 48-word cap remains cheap while covering typical Whisper runaways.
+        int maxPhraseLength = Math.Min(48, words.Count / 2);
         for (int phraseLength = 1; phraseLength <= maxPhraseLength; phraseLength++)
         {
-            for (int start = 0; start + phraseLength * 3 <= words.Count; start++)
+            for (int start = 0; start + phraseLength * 2 <= words.Count; start++)
             {
                 int repetitions = 1;
                 while (start + (repetitions + 1) * phraseLength <= words.Count &&
@@ -237,7 +296,7 @@ public static class TranscriptionQualityAnalyzer
                     repetitions++;
                 }
 
-                if (repetitions < 3)
+                if (repetitions < 2)
                 {
                     continue;
                 }
@@ -267,6 +326,11 @@ public static class TranscriptionQualityAnalyzer
         }
         return true;
     }
+
+
+    public static string NormalizeForComparison(string text) => NormalizeText(text);
+
+    public static int CountWords(string text) => Tokenize(text).Count;
 
     private static List<string> Tokenize(string text)
     {

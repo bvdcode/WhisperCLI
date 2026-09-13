@@ -30,6 +30,7 @@ public sealed class QualityAssessment
     public bool Suspicious { get; set; }
     public int WordCount { get; set; }
     public int MaxConsecutiveDuplicateSegments { get; set; }
+    public int MaxConsecutiveDuplicateSegmentWords { get; set; }
     public int LongestRepeatedPhraseWords { get; set; }
     public int LongestRepeatedPhraseCount { get; set; }
     public double RepeatedTokenFraction { get; set; }
@@ -64,19 +65,27 @@ public sealed class ChunkTranscriptionResult
 
 public sealed class TranscriptionCheckpoint
 {
-    public string SchemaVersion { get; set; } = "9";
+    public string SchemaVersion { get; set; } = "10";
     public string InputPath { get; set; } = string.Empty;
     public long InputLength { get; set; }
     public DateTime InputLastWriteUtc { get; set; }
     public string Fingerprint { get; set; } = string.Empty;
     public DateTime UpdatedUtc { get; set; }
+    // Entries are terminal processing outcomes, not certificates of transcription accuracy.
+    // NeedsReview does not mean unfinished. Infrastructure failures are never reusable.
     public List<ChunkTranscriptionResult> CompletedChunks { get; set; } = [];
+    public List<string> KnownHallucinationSegments { get; set; } = [];
 }
 
 public sealed class TranscriptionRunReport
 {
-    public string SchemaVersion { get; set; } = "9";
+    public string SchemaVersion { get; set; } = "10";
     public string InputPath { get; set; } = string.Empty;
+    // Additive fields: old schema-9/10 reports have null/empty values here.
+    public long? InputLength { get; set; }
+    public DateTime? InputLastWriteUtc { get; set; }
+    public string Fingerprint { get; set; } = string.Empty;
+    public string CompletionStatus => NeedsReview ? "completed-with-review" : "completed";
     public DateTime StartedUtc { get; set; }
     public DateTime CompletedUtc { get; set; }
     public string PrimaryModel { get; set; } = string.Empty;

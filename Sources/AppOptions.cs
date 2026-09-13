@@ -70,9 +70,17 @@ namespace WhisperCLI
         public int MinRecoverySplitSeconds { get; set; } = 15;
 
         [Option("resume", Required = false, Default = true,
-            HelpText = "Resume completed chunks from a matching checkpoint after interruption. Specify '--resume false' for a fresh run. Default: true.")]
+            HelpText = "Reuse completed chunks, including completed-with-review outcomes, from a matching checkpoint. Specify '--resume false' for a fresh run. Default: true.")]
         public bool? ResumeOption { get; set; } = true;
         public bool Resume => ResumeOption ?? true;
+
+        [Option("retry-review", Required = false, Default = false,
+            HelpText = "Explicitly retry cached chunks marked for review. A normal resume keeps these terminal outcomes instead of repeating an exhausted recovery ladder.")]
+        public bool RetryReview { get; set; }
+
+        [Option("revalidate-checkpoint", Required = false, Default = false,
+            HelpText = "Explicitly rescore cached text with the current quality detector and retry suspicious chunks. Not performed on ordinary resume.")]
+        public bool RevalidateCheckpoint { get; set; }
 
         [Option("lock-detected-language", Required = false, Default = true,
             HelpText = "When --language auto is used, lock the first reliable detected language for later chunks. Specify false to disable. Default: true.")]

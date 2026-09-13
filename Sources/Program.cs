@@ -91,6 +91,7 @@ namespace WhisperCLI
                     instanceLock = SingleInstanceLock.TryAcquire(logger);
                     if (instanceLock is null)
                     {
+                        Environment.ExitCode = 75;
                         logger.Warning("Another WhisperCLI instance appears to be running.");
                         await DelayBeforeExitAsync(options.DelaySeconds, cts.Token);
                         return;
@@ -100,7 +101,7 @@ namespace WhisperCLI
                 FileInfo result;
                 string osType = Environment.OSVersion.Platform.ToString();
                 logger.Information("Operating System: {osType}", osType);
-                logger.Information("WhisperCLI robust build: v13-runtime-copy-repair");
+                logger.Information("WhisperCLI robust build: v16-idempotent-resume");
 
                 WhisperRuntimeManager.Configure(options, logger);
 
@@ -136,6 +137,7 @@ namespace WhisperCLI
                     if (!inputFile.Exists)
                     {
                         logger.Error("Input file does not exist: {inputFilePath}", options.InputFilePath);
+                        Environment.ExitCode = 2;
                         return;
                     }
 
@@ -178,6 +180,7 @@ namespace WhisperCLI
             catch (OperationCanceledException) when (cts.IsCancellationRequested)
             {
                 logger.Information("Operation cancelled.");
+                Environment.ExitCode = 130;
             }
             catch (Exception ex)
             {

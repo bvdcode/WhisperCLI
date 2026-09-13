@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- .cs.txt prevents the containing CLI project's recursive source glob from compiling this test entry point. -->
+    <Compile Include="Program.cs.txt" />
+    <ProjectReference Include="../../WhisperCLI.csproj" />
+  </ItemGroup>
+</Project>

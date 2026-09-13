@@ -25,6 +25,7 @@ namespace WhisperCLI.Transcribers
         };
         private string? _lastWorkerRuntime;
         private bool _cudaLibraryGuardLogged;
+        private readonly HashSet<string> _dynamicHallucinationSegments = new(StringComparer.Ordinal);
 
         public FileTranscriber(
             ILogger logger,
@@ -70,10 +71,17 @@ namespace WhisperCLI.Transcribers
 
         public async Task<FileInfo> TranscribeRobustAsync(FileInfo inputFile, AppOptions options, CancellationToken token)
         {
+            _dynamicHallucinationSegments.Clear();
+
             if (_modelResolver is null)
             {
                 throw new InvalidOperationException("Robust transcription requires a model resolver.");
             }
+
+            List<GgmlType> fallbackModels = ResolveFallbackModels(options.Model, options.FallbackModels);
+            FileInfo? completedOutput = await TryReuseCompletedRunAsync(inputFile, options, fallbackModels, token);
+            if (completedOutput is not null)
+                return completedOutput;
 
             // Resolve the primary model before doing expensive audio preparation. Native Whisper
             // itself is intentionally loaded only inside an isolated worker process so a backend
@@ -144,11 +152,17 @@ namespace WhisperCLI.Transcribers
                 _logger.Information("Prepared {count} independent transcription chunks (target {target}s, hard max {max}s)",
                     chunks.Count, options.ChunkSeconds, options.MaxChunkSeconds);
 
-                List<GgmlType> fallbackModels = ResolveFallbackModels(options.Model, options.FallbackModels);
                 string fingerprint = BuildFingerprint(options, fallbackModels, usedVad);
-                string checkpointPath = BuildSidecarPath(inputFile, ".transcription.checkpoint.json");
+                string checkpointPath = BuildModelScopedPath(inputFile, options.Model, ".transcription.checkpoint.json");
+                string legacyCheckpointPath = BuildSidecarPath(inputFile, ".transcription.checkpoint.json");
                 TranscriptionCheckpoint checkpoint = options.Resume
-                    ? await LoadCheckpointAsync(checkpointPath, inputFile, fingerprint, token)
+                    ? await LoadCheckpointAsync(
+                        checkpointPath,
+                        legacyCheckpointPath,
+                        inputFile,
+                        fingerprint,
+                        options,
+                        token)
                     : NewCheckpoint(inputFile, fingerprint);
 
                 if (options.Resume && checkpoint.CompletedChunks.Count > 0)
@@ -167,16 +181,16 @@ namespace WhisperCLI.Transcribers
                         chunks.Count);
                 }
 
-                string partialTextPath = BuildSidecarPath(inputFile, ".partial.txt");
-                string partialSrtPath = BuildSidecarPath(inputFile, ".partial.srt");
-                string partialVttPath = BuildSidecarPath(inputFile, ".partial.vtt");
+                string partialTextPath = BuildModelScopedPath(inputFile, options.Model, ".partial.txt");
+                string partialSrtPath = BuildModelScopedPath(inputFile, options.Model, ".partial.srt");
+                string partialVttPath = BuildModelScopedPath(inputFile, options.Model, ".partial.vtt");
                 _logger.Information("Incremental transcript: {partialTextPath}", partialTextPath);
                 _logger.Information("Incremental subtitles: {partialSrtPath} and {partialVttPath}", partialSrtPath, partialVttPath);
                 _logger.Information("Resume checkpoint: {checkpointPath}", checkpointPath);
 
                 if (checkpoint.CompletedChunks.Count > 0)
                 {
-                    await WriteProgressOutputsAsync(inputFile, checkpoint.CompletedChunks, chunks.Count, CancellationToken.None);
+                    await WriteProgressOutputsAsync(inputFile, options.Model, checkpoint.CompletedChunks, chunks.Count, CancellationToken.None);
                 }
                 else
                 {
@@ -185,7 +199,7 @@ namespace WhisperCLI.Transcribers
                     TryDelete(partialTextPath);
                     TryDelete(partialSrtPath);
                     TryDelete(partialVttPath);
-                    TryDelete(BuildSidecarPath(inputFile, ".transcription.review.txt"));
+                    TryDelete(BuildModelScopedPath(inputFile, options.Model, ".transcription.review.txt"));
                 }
 
                 string? lockedLanguage = null;
@@ -203,6 +217,8 @@ namespace WhisperCLI.Transcribers
                 }
 
                 List<ChunkTranscriptionResult> completed = [];
+                int reusedChunks = 0;
+                int transcribedChunks = 0;
 
                 for (int i = 0; i < chunks.Count; i++)
                 {
@@ -217,6 +233,7 @@ namespace WhisperCLI.Transcribers
                     if (cached is not null)
                     {
                         result = cached;
+                        reusedChunks++;
                         _logger.Information("Chunk {chunkId} {start}-{end}: reused from checkpoint",
                             chunk.Id, FormatClock(chunk.Start), FormatClock(chunk.End));
                     }
@@ -237,6 +254,8 @@ namespace WhisperCLI.Transcribers
                             lockedLanguage,
                             token);
 
+                        transcribedChunks++;
+                        checkpoint.KnownHallucinationSegments = _dynamicHallucinationSegments.OrderBy(s => s).ToList();
                         checkpoint.CompletedChunks.RemoveAll(c => SameChunk(c.Chunk, chunk));
                         checkpoint.CompletedChunks.Add(result);
                         checkpoint.CompletedChunks = checkpoint.CompletedChunks
@@ -249,7 +268,11 @@ namespace WhisperCLI.Transcribers
                     completed.Add(result);
                     if (cached is null)
                     {
-                        await WriteProgressOutputsAsync(inputFile, completed, chunks.Count, CancellationToken.None);
+                        // On a partially invalidated checkpoint, later clean chunks may
+                        // already be cached even though the loop has not traversed them yet.
+                        // Write all currently known-good checkpoint results so partial output
+                        // never regresses to only the prefix processed in this invocation.
+                        await WriteProgressOutputsAsync(inputFile, options.Model, checkpoint.CompletedChunks, chunks.Count, CancellationToken.None);
                     }
 
                     if (IsAutoLanguage(options.Language) && options.LockDetectedLanguage && string.IsNullOrWhiteSpace(lockedLanguage))
@@ -263,9 +286,91 @@ namespace WhisperCLI.Transcribers
                     }
                 }
 
+                // A few Whisper hallucinations are not locally repetitive inside one chunk,
+                // but recur verbatim across many distant chunks (for example subtitle-credit
+                // boilerplate during silence). Discover those patterns after the first pass and
+                // repair their chunks immediately instead of requiring a second CLI invocation.
+                HashSet<string> newlyRecurring = FindRecurringCrossChunkSegments(completed);
+                newlyRecurring.ExceptWith(_dynamicHallucinationSegments);
+                // A fully cached run is a resume, not an implicit quality-improvement job.
+                // Exhausted/review-marked cached outcomes must not restart their ladder.
+                if (transcribedChunks > 0 && newlyRecurring.Count > 0)
+                {
+                    _dynamicHallucinationSegments.UnionWith(newlyRecurring);
+                    List<int> repairIndexes = completed
+                        .Select((result, index) => (result, index))
+                        .Where(x => ContainsAnyRecurringSegment(x.result.Segments, newlyRecurring) &&
+                                    !CheckpointReusePolicy.NeedsReview(x.result))
+                        .Select(x => x.index)
+                        .ToList();
+
+                    _logger.Warning(
+                        "Post-pass cross-chunk audit discovered {patterns} recurring hallucination patterns affecting {chunks} chunks. Repairing those chunks now.",
+                        newlyRecurring.Count, repairIndexes.Count);
+                    foreach (string recurring in newlyRecurring.OrderBy(x => x))
+                    {
+                        _logger.Warning("Recurring hallucination candidate: {segment}", TruncateForLog(recurring, 120));
+                    }
+
+                    foreach (int repairIndex in repairIndexes)
+                    {
+                        token.ThrowIfCancellationRequested();
+                        AudioChunk repairChunk = chunks[repairIndex];
+                        _logger.Warning(
+                            "Chunk {chunkId}: retranscribing because its accepted text matched a recurring cross-chunk hallucination pattern",
+                            repairChunk.Id);
+
+                        ChunkTranscriptionResult repaired = await TranscribeChunkWithRecoveryAsync(
+                            normalized.FullName,
+                            audioDuration,
+                            repairChunk,
+                            depth: 0,
+                            options,
+                            fallbackModels,
+                            speechRegions,
+                            models,
+                            lockedLanguage,
+                            token);
+
+                        completed[repairIndex] = repaired;
+                        checkpoint.KnownHallucinationSegments = _dynamicHallucinationSegments.OrderBy(s => s).ToList();
+                        checkpoint.CompletedChunks.RemoveAll(c => SameChunk(c.Chunk, repairChunk));
+                        checkpoint.CompletedChunks.Add(repaired);
+                        checkpoint.CompletedChunks = checkpoint.CompletedChunks.OrderBy(c => c.Chunk.Start).ToList();
+                        checkpoint.UpdatedUtc = DateTime.UtcNow;
+                        await SaveJsonAtomicAsync(checkpointPath, checkpoint, CancellationToken.None);
+                        await WriteProgressOutputsAsync(inputFile, options.Model, checkpoint.CompletedChunks, chunks.Count, CancellationToken.None);
+                    }
+
+                    HashSet<string> remainingRecurring = FindRecurringCrossChunkSegments(completed);
+                    remainingRecurring.IntersectWith(_dynamicHallucinationSegments);
+                    if (remainingRecurring.Count > 0)
+                    {
+                        foreach (ChunkTranscriptionResult result in completed)
+                        {
+                            if (!ContainsAnyRecurringSegment(result.Segments, remainingRecurring))
+                            {
+                                continue;
+                            }
+
+                            result.NeedsReview = true;
+                            result.Quality.Suspicious = true;
+                            result.Quality.Score = Math.Max(result.Quality.Score, 0.85);
+                            string reason = "recurring cross-chunk hallucination pattern remained after automatic repair";
+                            if (!result.Quality.Reasons.Contains(reason, StringComparer.Ordinal))
+                            {
+                                result.Quality.Reasons.Add(reason);
+                            }
+                        }
+                    }
+                }
+
                 var report = new TranscriptionRunReport
                 {
                     InputPath = inputFile.FullName,
+                    InputLength = inputFile.Length,
+                    InputLastWriteUtc = inputFile.LastWriteTimeUtc,
+                    Fingerprint = fingerprint,
                     StartedUtc = startedUtc,
                     CompletedUtc = DateTime.UtcNow,
                     PrimaryModel = options.Model.ToString(),
@@ -279,7 +384,19 @@ namespace WhisperCLI.Transcribers
                     Chunks = completed.OrderBy(c => c.Chunk.Start).ToList()
                 };
 
-                return await WriteOutputsAsync(inputFile, report, token);
+                // Save the final audited flags too: previously post-pass NeedsReview changes
+                // could exist only in the report, not in the last checkpoint.
+                foreach (ChunkTranscriptionResult result in report.Chunks)
+                    CheckpointReusePolicy.PropagateReviewFlags(result);
+                report.NeedsReview = report.Chunks.Any(CheckpointReusePolicy.NeedsReview);
+                checkpoint.CompletedChunks = report.Chunks;
+                checkpoint.KnownHallucinationSegments = _dynamicHallucinationSegments.OrderBy(s => s).ToList();
+                checkpoint.UpdatedUtc = DateTime.UtcNow;
+                await SaveJsonAtomicAsync(checkpointPath, checkpoint, CancellationToken.None);
+
+                _logger.Information("Processing summary: {reused} chunks reused; {transcribed} newly processed; {review} completed with review flags. Review flags do not trigger automatic retries on the next run.",
+                    reusedChunks, transcribedChunks, report.Chunks.Count(CheckpointReusePolicy.NeedsReview));
+                return await WriteOutputsAsync(inputFile, options.Model, report, token);
             }
             finally
             {
@@ -392,13 +509,14 @@ namespace WhisperCLI.Transcribers
                         .ToList();
                     QualityAssessment mergedQuality = TranscriptionQualityAnalyzer.Analyze(
                         merged, chunk.Duration, chunk.ExpectedSpeech, options.GlitchThreshold);
+                    ApplyDynamicHallucinationPenalty(mergedQuality, merged, _dynamicHallucinationSegments);
 
                     return new ChunkTranscriptionResult
                     {
                         Chunk = chunk,
                         SelectedModel = "multiple",
                         SelectedStrategy = "recursive-split-recovery",
-                        NeedsReview = leftResult.NeedsReview || rightResult.NeedsReview,
+                        NeedsReview = leftResult.NeedsReview || rightResult.NeedsReview || mergedQuality.Suspicious,
                         Quality = mergedQuality,
                         Segments = merged,
                         Attempts = diagnostics,
@@ -542,6 +660,7 @@ namespace WhisperCLI.Transcribers
                     coverage.ExpectedSpeech,
                     options.GlitchThreshold,
                     workerResult.LiveLoopAborted);
+                ApplyDynamicHallucinationPenalty(quality, selectedSegments, _dynamicHallucinationSegments);
 
                 sw.Stop();
                 diagnostic.ElapsedSeconds = sw.Elapsed.TotalSeconds;
@@ -1076,6 +1195,7 @@ namespace WhisperCLI.Transcribers
 
         private async Task WriteProgressOutputsAsync(
             FileInfo inputFile,
+            GgmlType primaryModel,
             IReadOnlyList<ChunkTranscriptionResult> completedChunks,
             int totalChunks,
             CancellationToken token)
@@ -1085,9 +1205,9 @@ namespace WhisperCLI.Transcribers
                 .OrderBy(s => s.Start)
                 .ToList();
 
-            string textPath = BuildSidecarPath(inputFile, ".partial.txt");
-            string srtPath = BuildSidecarPath(inputFile, ".partial.srt");
-            string vttPath = BuildSidecarPath(inputFile, ".partial.vtt");
+            string textPath = BuildModelScopedPath(inputFile, primaryModel, ".partial.txt");
+            string srtPath = BuildModelScopedPath(inputFile, primaryModel, ".partial.srt");
+            string vttPath = BuildModelScopedPath(inputFile, primaryModel, ".partial.vtt");
 
             await WriteTextAtomicAsync(textPath, AssembleText(segments), token);
             await WriteTextAtomicAsync(srtPath, BuildSrt(segments), token);
@@ -1099,19 +1219,23 @@ namespace WhisperCLI.Transcribers
                 completedTopLevel, totalChunks, textPath);
         }
 
-        private async Task<FileInfo> WriteOutputsAsync(FileInfo inputFile, TranscriptionRunReport report, CancellationToken token)
+        private async Task<FileInfo> WriteOutputsAsync(
+            FileInfo inputFile,
+            GgmlType primaryModel,
+            TranscriptionRunReport report,
+            CancellationToken token)
         {
             List<TranscriptSegment> segments = report.Chunks
                 .SelectMany(FlattenSegments)
                 .OrderBy(s => s.Start)
                 .ToList();
 
-            string textPath = Path.ChangeExtension(inputFile.FullName, ".txt");
-            string srtPath = Path.ChangeExtension(inputFile.FullName, ".srt");
-            string vttPath = Path.ChangeExtension(inputFile.FullName, ".vtt");
-            string jsonPath = BuildSidecarPath(inputFile, ".transcription.json");
-            string logPath = BuildSidecarPath(inputFile, ".transcription.log");
-            string reviewPath = BuildSidecarPath(inputFile, ".transcription.review.txt");
+            string textPath = BuildModelScopedPath(inputFile, primaryModel, ".txt");
+            string srtPath = BuildModelScopedPath(inputFile, primaryModel, ".srt");
+            string vttPath = BuildModelScopedPath(inputFile, primaryModel, ".vtt");
+            string jsonPath = BuildModelScopedPath(inputFile, primaryModel, ".transcription.json");
+            string logPath = BuildModelScopedPath(inputFile, primaryModel, ".transcription.log");
+            string reviewPath = BuildModelScopedPath(inputFile, primaryModel, ".transcription.review.txt");
 
             string text = AssembleText(segments);
             await WriteTextAtomicAsync(textPath, text, token);
@@ -1130,9 +1254,9 @@ namespace WhisperCLI.Transcribers
                 TryDelete(reviewPath);
             }
 
-            TryDelete(BuildSidecarPath(inputFile, ".partial.txt"));
-            TryDelete(BuildSidecarPath(inputFile, ".partial.srt"));
-            TryDelete(BuildSidecarPath(inputFile, ".partial.vtt"));
+            TryDelete(BuildModelScopedPath(inputFile, primaryModel, ".partial.txt"));
+            TryDelete(BuildModelScopedPath(inputFile, primaryModel, ".partial.srt"));
+            TryDelete(BuildModelScopedPath(inputFile, primaryModel, ".partial.vtt"));
 
             _logger.Information("Transcription complete: {textPath}", textPath);
             _logger.Information("Subtitles: {srtPath} and {vttPath}", srtPath, vttPath);
@@ -1183,6 +1307,7 @@ namespace WhisperCLI.Transcribers
             sb.AppendLine($"Requested language: {report.RequestedLanguage}");
             sb.AppendLine($"Locked detected language: {report.LockedDetectedLanguage ?? "<none>"}");
             sb.AppendLine($"Boundary detection: {(report.UsedVad ? "managed energy/silence" : "fixed chunks")}, activity regions={report.VadSpeechRegionCount}");
+            sb.AppendLine($"Processing status: {report.CompletionStatus}");
             sb.AppendLine($"Needs review: {report.NeedsReview}");
             sb.AppendLine();
 
@@ -1221,7 +1346,8 @@ namespace WhisperCLI.Transcribers
         private static string BuildReviewFile(TranscriptionRunReport report)
         {
             StringBuilder sb = new();
-            sb.AppendLine("The following intervals exhausted automatic recovery and should be checked manually:");
+            sb.AppendLine("The following intervals need review (recovery exhausted or a quality audit remained suspicious):");
+            sb.AppendLine("Processing is complete. Ordinary resume reuses these outcomes. Use --retry-review to retry them explicitly.");
             sb.AppendLine();
             foreach (ChunkTranscriptionResult chunk in report.Chunks.Where(c => c.NeedsReview))
             {
@@ -1232,7 +1358,8 @@ namespace WhisperCLI.Transcribers
 
         private static void AppendReviewEntries(StringBuilder sb, ChunkTranscriptionResult chunk)
         {
-            if (chunk.SubChunks.Count == 0 && chunk.NeedsReview)
+            // A merged parent can be suspicious even when all its children passed alone.
+            if (chunk.NeedsReview && (chunk.SubChunks.Count == 0 || !chunk.SubChunks.Any(c => c.NeedsReview)))
             {
                 sb.AppendLine($"{FormatClock(chunk.Chunk.Start)} - {FormatClock(chunk.Chunk.End)} | " +
                               $"{chunk.SelectedModel}/{chunk.SelectedStrategy} | score={chunk.Quality.Score:F2}");
@@ -1517,67 +1644,375 @@ namespace WhisperCLI.Transcribers
             UpdatedUtc = DateTime.UtcNow
         };
 
-        private async Task<TranscriptionCheckpoint> LoadCheckpointAsync(
-            string path,
+        /// <summary>
+        /// A compatible, fully covered terminal result needs neither audio conversion nor
+        /// a model/FFmpeg/CUDA preflight. File existence alone is never a completion test.
+        /// </summary>
+        private async Task<FileInfo?> TryReuseCompletedRunAsync(
             FileInfo inputFile,
-            string fingerprint,
+            AppOptions options,
+            IReadOnlyList<GgmlType> fallbackModels,
             CancellationToken token)
         {
-            if (!File.Exists(path))
+            if (!options.Resume || options.RetryReview || options.RevalidateCheckpoint)
+                return null;
+
+            string checkpointPath = BuildModelScopedPath(inputFile, options.Model, ".transcription.checkpoint.json");
+            string legacyCheckpointPath = BuildSidecarPath(inputFile, ".transcription.checkpoint.json");
+            string sourcePath = File.Exists(checkpointPath) ? checkpointPath : legacyCheckpointPath;
+            bool legacy = !string.Equals(sourcePath, checkpointPath, StringComparison.Ordinal);
+            string reportPath = legacy
+                ? BuildSidecarPath(inputFile, ".transcription.json")
+                : BuildModelScopedPath(inputFile, options.Model, ".transcription.json");
+            if (!File.Exists(sourcePath) || !File.Exists(reportPath))
+                return null;
+
+            TranscriptionCheckpoint? checkpoint;
+            TranscriptionRunReport? report;
+            try
             {
+                checkpoint = JsonSerializer.Deserialize<TranscriptionCheckpoint>(
+                    await File.ReadAllTextAsync(sourcePath, token), JsonOptions);
+                report = JsonSerializer.Deserialize<TranscriptionRunReport>(
+                    await File.ReadAllTextAsync(reportPath, token), JsonOptions);
+            }
+            catch (Exception ex) when (ex is JsonException or IOException or UnauthorizedAccessException)
+            {
+                _logger.Warning("Completed-result cache could not be read ({message}); checking the regular checkpoint path", ex.Message);
+                return null;
+            }
+
+            if (checkpoint is null || report is null ||
+                !IsSupportedCheckpointSchema(checkpoint.SchemaVersion) ||
+                !IsSupportedCheckpointSchema(report.SchemaVersion) ||
+                !SameInputPath(report.InputPath, inputFile.FullName) ||
+                !string.Equals(report.PrimaryModel, options.Model.ToString(), StringComparison.Ordinal) ||
+                report.StartedUtc == default || report.CompletedUtc < report.StartedUtc ||
+                !CheckpointReusePolicy.CoversWholeAudio(report.Chunks, report.AudioDuration))
+                return null;
+
+            string fingerprint = BuildFingerprint(options, fallbackModels, options.UseVad && report.UsedVad);
+            if (!CheckpointMatchesInput(checkpoint, inputFile, fingerprint) ||
+                checkpoint.CompletedChunks is null || checkpoint.CompletedChunks.Count == 0 ||
+                checkpoint.CompletedChunks.Count > report.Chunks.Count ||
+                checkpoint.CompletedChunks.Any(c => !CheckpointReusePolicy.IsTerminal(c)))
+                return null;
+
+            // Every existing checkpoint entry must agree exactly with the last completed
+            // report. Do not roll back results from a newer, interrupted explicit repair.
+            var seen = new HashSet<(TimeSpan Start, TimeSpan End)>();
+            foreach (ChunkTranscriptionResult cached in checkpoint.CompletedChunks)
+            {
+                if (!seen.Add((cached.Chunk.Start, cached.Chunk.End)))
+                    return null;
+                ChunkTranscriptionResult? saved = report.Chunks.FirstOrDefault(c => SameChunk(c.Chunk, cached.Chunk));
+                if (saved is null || JsonSerializer.Serialize(cached, JsonOptions) != JsonSerializer.Serialize(saved, JsonOptions))
+                    return null;
+            }
+
+            bool legacyReportIdentity = report.InputLength is null && report.InputLastWriteUtc is null &&
+                                        string.IsNullOrWhiteSpace(report.Fingerprint);
+            if (!legacyReportIdentity)
+            {
+                if (report.InputLength != inputFile.Length || report.InputLastWriteUtc != inputFile.LastWriteTimeUtc ||
+                    !string.Equals(report.Fingerprint, fingerprint, StringComparison.Ordinal))
+                    return null;
+            }
+            else
+            {
+                // v15 reports lack input size/mtime/options identity. Accept them only with
+                // a corroborating checkpoint and unchanged input predating that report.
+                // The 2-second allowance covers final checkpoint/report write ordering.
+                if (inputFile.LastWriteTimeUtc > report.StartedUtc ||
+                    report.CompletedUtc > checkpoint.UpdatedUtc.AddSeconds(2))
+                    return null;
+            }
+
+            int recovered = report.Chunks.Count - checkpoint.CompletedChunks.Count;
+            bool flagsChanged = false;
+            foreach (ChunkTranscriptionResult result in report.Chunks)
+                flagsChanged |= CheckpointReusePolicy.PropagateReviewFlags(result);
+            bool review = report.Chunks.Any(CheckpointReusePolicy.NeedsReview);
+            flagsChanged |= report.NeedsReview != review;
+            report.NeedsReview = review;
+            report.InputLength = inputFile.Length;
+            report.InputLastWriteUtc = inputFile.LastWriteTimeUtc;
+            report.Fingerprint = fingerprint;
+
+            if (recovered > 0 && !legacy)
+            {
+                // v14/v15 may already have deleted terminal entries during an interrupted
+                // revalidation run. Their final report can still retain those exact results.
+                string backup = checkpointPath + ".pre-v16.bak";
+                if (!File.Exists(backup))
+                    File.Copy(checkpointPath, backup, overwrite: false);
+            }
+            if (legacy || recovered > 0 || flagsChanged || checkpoint.SchemaVersion == "9")
+            {
+                checkpoint.CompletedChunks = report.Chunks.OrderBy(c => c.Chunk.Start).ToList();
+                checkpoint.SchemaVersion = "10";
+                checkpoint.UpdatedUtc = DateTime.UtcNow;
+                await SaveJsonAtomicAsync(checkpointPath, checkpoint, token);
+            }
+            if (recovered > 0)
+                _logger.Information("Recovered {count} terminal checkpoint entries from the matching completed report; no inference is required", recovered);
+            if (legacy)
+                _logger.Information("Migrated completed legacy result into the {model} output namespace; legacy files were left untouched", options.Model);
+
+            string textPath = BuildModelScopedPath(inputFile, options.Model, ".txt");
+            bool outputsPresent = new[] { ".txt", ".srt", ".vtt", ".transcription.json", ".transcription.log" }
+                .All(suffix => File.Exists(BuildModelScopedPath(inputFile, options.Model, suffix)));
+            if (review && !File.Exists(BuildModelScopedPath(inputFile, options.Model, ".transcription.review.txt")))
+                outputsPresent = false;
+
+            if (legacy || !outputsPresent || flagsChanged)
+            {
+                _logger.Information("Restoring output files from the completed report without retranscription");
+                await WriteOutputsAsync(inputFile, options.Model, report, token);
+            }
+            else if (legacyReportIdentity)
+            {
+                // Enrich old reports once for strict identity checks on future fast resumes.
+                // Transcript/subtitle contents and the original run times are not changed.
+                await SaveJsonAtomicAsync(reportPath, report, token);
+            }
+
+            _logger.Information("Already processed: {reused}/{total} chunks reused; 0 Whisper attempts; FFmpeg/model preflight skipped. Output: {path}",
+                report.Chunks.Count, report.Chunks.Count, textPath);
+            if (review)
+                _logger.Warning("Cached result is completed-with-review ({count} intervals). No automatic retry; use --retry-review explicitly. Review file: {path}",
+                    report.Chunks.Count(CheckpointReusePolicy.NeedsReview),
+                    BuildModelScopedPath(inputFile, options.Model, ".transcription.review.txt"));
+            return new FileInfo(textPath);
+        }
+
+        private static bool IsSupportedCheckpointSchema(string? schema) => schema is "9" or "10";
+
+        private static bool SameInputPath(string? first, string second) =>
+            string.Equals(first, second, OperatingSystem.IsWindows()
+                ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
+
+        private static bool CheckpointMatchesInput(TranscriptionCheckpoint checkpoint, FileInfo inputFile, string fingerprint) =>
+            SameInputPath(checkpoint.InputPath, inputFile.FullName) &&
+            checkpoint.InputLength == inputFile.Length &&
+            checkpoint.InputLastWriteUtc == inputFile.LastWriteTimeUtc &&
+            string.Equals(checkpoint.Fingerprint, fingerprint, StringComparison.Ordinal);
+
+        private async Task<TranscriptionCheckpoint> LoadCheckpointAsync(
+            string path,
+            string legacyPath,
+            FileInfo inputFile,
+            string fingerprint,
+            AppOptions options,
+            CancellationToken token)
+        {
+            string? sourcePath = File.Exists(path) ? path : File.Exists(legacyPath) ? legacyPath : null;
+            if (sourcePath is null)
+                return NewCheckpoint(inputFile, fingerprint);
+            bool usingLegacyPath = !string.Equals(sourcePath, path, StringComparison.Ordinal);
+
+            TranscriptionCheckpoint? checkpoint;
+            try
+            {
+                checkpoint = JsonSerializer.Deserialize<TranscriptionCheckpoint>(
+                    await File.ReadAllTextAsync(sourcePath, token), JsonOptions);
+            }
+            catch (Exception ex) when (ex is JsonException or IOException or UnauthorizedAccessException)
+            {
+                _logger.Warning(ex, "Could not read transcription checkpoint; starting a fresh run");
+                return NewCheckpoint(inputFile, fingerprint);
+            }
+            if (checkpoint is null || !IsSupportedCheckpointSchema(checkpoint.SchemaVersion) ||
+                checkpoint.CompletedChunks is null || !CheckpointMatchesInput(checkpoint, inputFile, fingerprint))
+            {
+                _logger.Information("Checkpoint does not match this input/options or has an unsupported schema; it will not be reused");
                 return NewCheckpoint(inputFile, fingerprint);
             }
 
-            try
+            int originalCount = checkpoint.CompletedChunks.Count;
+            bool changed = usingLegacyPath || checkpoint.SchemaVersion == "9";
+            _dynamicHallucinationSegments.UnionWith(checkpoint.KnownHallucinationSegments ?? []);
+            // Invalid infrastructure entries must not enter the text-pattern detector.
+            var terminal = checkpoint.CompletedChunks.Where(CheckpointReusePolicy.IsTerminal).ToList();
+            HashSet<string> recurring = FindRecurringCrossChunkSegments(terminal);
+            _dynamicHallucinationSegments.UnionWith(recurring);
+            if (recurring.Count > 0)
+                _logger.Information("Recorded {count} recurring text patterns for any new attempts. Ordinary resume does not invalidate completed outcomes", recurring.Count);
+
+            List<ChunkTranscriptionResult> reusable = [];
+            List<string> invalidated = [];
+            foreach (ChunkTranscriptionResult result in checkpoint.CompletedChunks)
             {
-                string json = await File.ReadAllTextAsync(path, token);
-                TranscriptionCheckpoint? checkpoint = JsonSerializer.Deserialize<TranscriptionCheckpoint>(json, JsonOptions);
-                bool matches = checkpoint is not null &&
-                               checkpoint.SchemaVersion == "9" &&
-                               checkpoint.InputLength == inputFile.Length &&
-                               checkpoint.InputLastWriteUtc == inputFile.LastWriteTimeUtc &&
-                               checkpoint.Fingerprint == fingerprint;
-
-                if (matches)
+                string? reason = null;
+                if (!CheckpointReusePolicy.IsTerminal(result))
                 {
-                    _logger.Information("Valid checkpoint found with {count} completed chunks", checkpoint!.CompletedChunks.Count);
-                    return checkpoint!;
-                }
-
-                if (checkpoint is not null && checkpoint.SchemaVersion != "9")
-                {
-                    _logger.Warning("Ignoring checkpoint schema {schema}; v13 uses schema 9 because native runtime output repair/copy semantics changed and older failed native-runtime checkpoints are unsafe to reuse.", checkpoint.SchemaVersion);
+                    reason = "saved entry is incomplete, malformed, or contains an infrastructure failure";
                 }
                 else
                 {
-                    _logger.Information("Existing checkpoint does not match the current input/options and will not be reused");
+                    changed |= CheckpointReusePolicy.PropagateReviewFlags(result);
+                    if (options.RevalidateCheckpoint)
+                    {
+                        bool passed = TryRevalidateCachedChunk(result, options.GlitchThreshold,
+                            _dynamicHallucinationSegments, out QualityAssessment reassessed);
+                        result.Quality = reassessed;
+                        changed = true;
+                        if (!passed)
+                            reason = "explicit quality revalidation: " + string.Join("; ", reassessed.Reasons);
+                    }
+                    if (reason is null && options.RetryReview && CheckpointReusePolicy.NeedsReview(result))
+                        reason = "explicit --retry-review requested";
+                }
+                if (reason is null)
+                {
+                    reusable.Add(result);
+                }
+                else
+                {
+                    string id = result?.Chunk?.Id ?? "<malformed>";
+                    invalidated.Add(id);
+                    _logger.Warning("Cached chunk {chunkId} scheduled for processing: {reason}", id, reason);
                 }
             }
-            catch (Exception ex) when (ex is not OperationCanceledException)
+
+            checkpoint.CompletedChunks = reusable.OrderBy(c => c.Chunk.Start).ToList();
+            checkpoint.SchemaVersion = "10";
+            List<string> patterns = _dynamicHallucinationSegments.OrderBy(s => s).ToList();
+            changed |= !(checkpoint.KnownHallucinationSegments ?? []).SequenceEqual(patterns);
+            checkpoint.KnownHallucinationSegments = patterns;
+            if (changed || invalidated.Count > 0)
             {
-                _logger.Warning(ex, "Could not read transcription checkpoint; starting a fresh run");
+                checkpoint.UpdatedUtc = DateTime.UtcNow;
+                await SaveJsonAtomicAsync(path, checkpoint, token);
+            }
+            if (usingLegacyPath)
+                _logger.Information("Compatible legacy checkpoint copied to {path}; legacy file left untouched", path);
+            _logger.Information("Checkpoint retained {retained}/{original} completed chunks, including {review} completed-with-review outcomes; {retry} scheduled for processing",
+                reusable.Count, originalCount, reusable.Count(CheckpointReusePolicy.NeedsReview), invalidated.Count);
+            return checkpoint;
+        }
+
+        private static ChunkTranscriptionResult? FindCachedChunk(TranscriptionCheckpoint checkpoint, AudioChunk chunk) =>
+            checkpoint.CompletedChunks.FirstOrDefault(c =>
+                CheckpointReusePolicy.IsTerminal(c) && SameChunk(c.Chunk, chunk));
+
+        private static bool IsReusableCachedChunk(ChunkTranscriptionResult result) =>
+            CheckpointReusePolicy.IsTerminal(result);
+
+        private static bool TryRevalidateCachedChunk(
+            ChunkTranscriptionResult result,
+            double glitchThreshold,
+            IReadOnlySet<string> recurringSegments,
+            out QualityAssessment reassessed)
+        {
+            reassessed = TranscriptionQualityAnalyzer.Analyze(
+                result.Segments, result.Chunk.Duration, result.Chunk.ExpectedSpeech, glitchThreshold);
+            ApplyDynamicHallucinationPenalty(reassessed, result.Segments, recurringSegments);
+            bool childrenPassed = true;
+            foreach (ChunkTranscriptionResult child in result.SubChunks)
+            {
+                bool passed = TryRevalidateCachedChunk(child, glitchThreshold, recurringSegments, out QualityAssessment childQuality);
+                child.Quality = childQuality;
+                child.NeedsReview |= !passed;
+                childrenPassed &= passed;
+            }
+            result.NeedsReview |= reassessed.Suspicious || !childrenPassed;
+            return CheckpointReusePolicy.IsTerminal(result) && !reassessed.Suspicious && childrenPassed;
+        }
+
+
+        private static void ApplyDynamicHallucinationPenalty(
+            QualityAssessment quality,
+            IReadOnlyList<TranscriptSegment> segments,
+            IReadOnlySet<string> recurringSegments)
+        {
+            if (recurringSegments.Count == 0)
+            {
+                return;
             }
 
-            return NewCheckpoint(inputFile, fingerprint);
+            string? matched = segments
+                .Select(s => TranscriptionQualityAnalyzer.NormalizeForComparison(s.Text))
+                .FirstOrDefault(s => recurringSegments.Contains(s));
+            if (matched is null)
+            {
+                return;
+            }
+
+            quality.Score = Math.Max(quality.Score, 0.85);
+            quality.Suspicious = true;
+            string reason = $"segment matches a recurring cross-chunk hallucination pattern: '{TruncateForLog(matched, 80)}'";
+            if (!quality.Reasons.Contains(reason, StringComparer.Ordinal))
+            {
+                quality.Reasons.Add(reason);
+            }
         }
 
-        private static ChunkTranscriptionResult? FindCachedChunk(TranscriptionCheckpoint checkpoint, AudioChunk chunk)
+        private static HashSet<string> FindRecurringCrossChunkSegments(
+            IReadOnlyList<ChunkTranscriptionResult> results)
         {
-            return checkpoint.CompletedChunks.FirstOrDefault(c =>
-                SameChunk(c.Chunk, chunk) && IsReusableCachedChunk(c));
+            Dictionary<string, RecurringSegmentStats> stats = new(StringComparer.Ordinal);
+
+            foreach (ChunkTranscriptionResult result in results)
+            {
+                int chunkWords = TranscriptionQualityAnalyzer.CountWords(
+                    string.Join(' ', result.Segments.Select(s => s.Text)));
+
+                foreach (TranscriptSegment segment in result.Segments)
+                {
+                    string normalized = TranscriptionQualityAnalyzer.NormalizeForComparison(segment.Text);
+                    int segmentWords = TranscriptionQualityAnalyzer.CountWords(normalized);
+                    if (segmentWords < 3 || segmentWords > 12 || normalized.Length < 8)
+                    {
+                        continue;
+                    }
+
+                    if (!stats.TryGetValue(normalized, out RecurringSegmentStats? item))
+                    {
+                        item = new RecurringSegmentStats();
+                        stats[normalized] = item;
+                    }
+
+                    item.ChunkIds.Add(result.Chunk.Id);
+                    if (chunkWords <= 25 || (chunkWords > 0 && (double)segmentWords / chunkWords >= 0.20))
+                    {
+                        item.DominantOccurrences++;
+                    }
+                }
+            }
+
+            return stats
+                .Where(kvp => kvp.Value.ChunkIds.Count >= 3 && kvp.Value.DominantOccurrences >= 2)
+                .Select(kvp => kvp.Key)
+                .ToHashSet(StringComparer.Ordinal);
         }
 
-        private static bool IsReusableCachedChunk(ChunkTranscriptionResult result)
+        private static bool ContainsAnyRecurringSegment(
+            IReadOnlyList<TranscriptSegment> segments,
+            IReadOnlySet<string> recurringSegments)
         {
-            // A checkpoint entry created from an infrastructure exception is never valid
-            // transcription work. Schema 5 invalidates older unsafe checkpoints globally, but keep this
-            // guard so a future transient backend failure cannot poison a resumable run.
-            if (ContainsAttemptError(result))
+            if (recurringSegments.Count == 0)
             {
                 return false;
             }
 
-            return true;
+            return segments.Any(s => recurringSegments.Contains(
+                TranscriptionQualityAnalyzer.NormalizeForComparison(s.Text)));
+        }
+
+        private static string TruncateForLog(string text, int maxLength)
+        {
+            if (text.Length <= maxLength)
+            {
+                return text;
+            }
+            return text[..Math.Max(1, maxLength - 1)] + "…";
+        }
+
+        private sealed class RecurringSegmentStats
+        {
+            public HashSet<string> ChunkIds { get; } = new(StringComparer.Ordinal);
+            public int DominantOccurrences { get; set; }
         }
 
         private static bool ContainsAttemptError(ChunkTranscriptionResult result)
@@ -1778,6 +2213,27 @@ namespace WhisperCLI.Transcribers
             string json = JsonSerializer.Serialize(value, JsonOptions);
             await File.WriteAllTextAsync(temp, json, Encoding.UTF8, token);
             File.Move(temp, path, overwrite: true);
+        }
+
+        private static string BuildModelScopedPath(FileInfo inputFile, GgmlType primaryModel, string suffix)
+        {
+            string directory = inputFile.DirectoryName ?? Environment.CurrentDirectory;
+            string stem = Path.GetFileNameWithoutExtension(inputFile.Name);
+            string modelTag = SanitizeFileNamePart(primaryModel.ToString());
+            return Path.Combine(directory, $"{stem}.{modelTag}{suffix}");
+        }
+
+        private static string SanitizeFileNamePart(string value)
+        {
+            HashSet<char> invalid = Path.GetInvalidFileNameChars().ToHashSet();
+            StringBuilder sb = new(value.Length);
+            foreach (char c in value)
+            {
+                sb.Append(invalid.Contains(c) ? '_' : c);
+            }
+
+            string sanitized = sb.ToString().Trim().TrimEnd('.');
+            return string.IsNullOrWhiteSpace(sanitized) ? "model" : sanitized;
         }
 
         private static string BuildSidecarPath(FileInfo inputFile, string suffix)

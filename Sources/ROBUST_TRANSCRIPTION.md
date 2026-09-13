@@ -1,8 +1,32 @@
-﻿# Robust long-file transcription — v10
+﻿# Robust transcription — v16
+
+**Current resume policy:** completed and completed-with-review results are terminal
+and reused by default. Quality revalidation or retrying exhausted outcomes requires
+`--revalidate-checkpoint` or `--retry-review`. See [IDEMPOTENT_RESUME.md](IDEMPOTENT_RESUME.md)
+for the current behavior, compatibility checks, batch helper and regression tests.
+The older sections below describe the implementation history; where they describe
+automatic revalidation on every restart, the v16 policy supersedes them.
+
+# Robust long-file transcription — v10
 
 v10 keeps the chunk/retry/checkpoint pipeline but changes the most important reliability boundary: native Whisper inference runs in an isolated child process.
 
 Why: whisper.cpp/Whisper.net GPU backends can terminate the entire .NET process with a native access violation/segfault/stack overflow. Such failures cannot be caught reliably by `try/catch`. In v10 the parent CLI survives, reports the worker exit code and native stderr tail, and never records the failed chunk as completed.
+
+## v15 model-scoped output naming
+
+Every persistent transcription artifact now includes the requested primary model in its
+filename. The primary model is the CLI `-m/--model` value; fallback models selected for
+individual chunks do not change the run namespace.
+
+Example for `-m LargeV3` and input `lecture.mp3`:
+
+- `lecture.LargeV3.txt`
+- `lecture.LargeV3.srt` / `lecture.LargeV3.vtt`
+- `lecture.LargeV3.partial.*`
+- `lecture.LargeV3.transcription.checkpoint.json`
+- `lecture.LargeV3.transcription.json` / `.log` / `.review.txt`
+
 
 ## Normal command
 
@@ -50,14 +74,24 @@ The parent normalizes the original recording once, then creates each attempt WAV
 
 ## Partial results and resume
 
-After each accepted top-level chunk:
+After each accepted top-level chunk, outputs are namespaced by the requested primary model:
 
-- `<name>.partial.txt`
-- `<name>.partial.srt`
-- `<name>.partial.vtt`
-- `<name>.transcription.checkpoint.json`
+- `<name>.<PrimaryModel>.partial.txt`
+- `<name>.<PrimaryModel>.partial.srt`
+- `<name>.<PrimaryModel>.partial.vtt`
+- `<name>.<PrimaryModel>.transcription.checkpoint.json`
 
-are updated. Ctrl+C kills the active worker and leaves already completed chunks reusable.
+Final artifacts use the same namespace, for example `recording.LargeV3.txt`,
+`recording.LargeV3.srt`, `recording.LargeV3.transcription.json`, and
+`recording.LargeV3.transcription.log`. This allows the same recording to be run with
+LargeV3, LargeV3Turbo, LargeV2, etc. without overwriting another model's results.
+
+For a one-time migration from v14 and older, if the model-scoped checkpoint does not
+exist, v15 may read the legacy `<name>.transcription.checkpoint.json`. It is reused only
+when its input/options fingerprint matches the requested primary model. The compatible
+checkpoint is then written to the new model-scoped path; the legacy file is left untouched.
+
+Ctrl+C kills the active worker and leaves already completed chunks reusable.
 
 v10 uses checkpoint schema 6. Older schemas are intentionally ignored because they were produced before native-process isolation and may contain execution failures recorded as completed chunks.
 
@@ -121,4 +155,21 @@ v13 therefore:
   of telling the user to install CUDA 13.
 
 After applying v13, perform one explicit clean rebuild (`rm -rf bin obj && dotnet restore --force`). v13 also has a development-time repair fallback: if `libggml-cuda-whisper.so` is absent from output, it searches the exact NuGet cache package `whisper.net.runtime.cuda.linux/1.8.1` and copies the native sibling `.so` files into `runtimes/cuda/linux-x64` before CUDA dependency preflight. Future normal
-`dotnet run` builds include the stale-native cleanup target automatically.
+`dotnet run` builds rely on the exactly pinned native packages; the runtime repair fallback remains available if a development output is incomplete.
+
+
+## v14 repetition-quality revalidation
+
+v14 keeps the stable v13 CUDA/runtime architecture and tightens only transcription-quality handling. The completed 90-minute validation run exposed a false-negative class that v13 did not reject: long sentence cycles (the repeated unit can exceed 12 words) and two-copy segment hallucinations.
+
+Changes:
+
+- live loop detection searches repeating units up to 48 words and aborts after three exact repeats of a 4+ word phrase;
+- final quality analysis also searches two-copy cycles up to 48 words;
+- two identical long segments, and short chunks dominated by a repeated 3+ word segment, are treated as stronger hallucination signals;
+- an extremely low unique-bigram ratio on a long chunk is a strong backstop for sentence-cycle loops;
+- a 4+ word phrase repeated three times is now a strong signal instead of merely scoring 0.60 below the default 0.65 threshold;
+- recursive split results remain marked for review if the merged transcript is still suspicious;
+- schema-9 v13 checkpoints are accepted once, every cached final transcript is rescored with the v14 detector, bad cached chunks are removed, and only those intervals are retranscribed. Clean cached chunks remain reusable. The upgraded checkpoint is saved as schema 10.
+
+This allows a finished v13 run to be repaired without retranscribing the full file.
