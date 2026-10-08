@@ -1,28 +1,61 @@
-# This workflow will build a .NET project
-# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-net
-
-name: .NET
+name: Build and Release
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [main]
   pull_request:
-    branches: [ "main" ]
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: whispercli-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  build:
-
-    runs-on: ubuntu-latest
-
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
     steps:
-    - uses: actions/checkout@v4
-    - name: Setup .NET
-      uses: actions/setup-dotnet@v4
-      with:
-        dotnet-version: 9.0.x
-    - name: Restore dependencies
-      run: dotnet restore
-    - name: Build
-      run: dotnet build --no-restore
-    - name: Test
-      run: dotnet test --no-build --verbosity normal
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+
+      - name: Determine version
+        id: version
+        shell: pwsh
+        run: ./.github/scripts/determine-version.ps1
+
+      - name: Validate and package Windows executable
+        shell: pwsh
+        run: |
+          ./.github/scripts/test-and-package.ps1 `
+            -Version '${{ steps.version.outputs.SemVer }}' `
+            -AssemblyVersion '${{ steps.version.outputs.AssemblyVersion }}' `
+            -FileVersion '${{ steps.version.outputs.FileVersion }}'
+        env:
+          ContinuousIntegrationBuild: true
+
+      - uses: actions/upload-artifact@v5
+        with:
+          name: WhisperCLI-win-x64-${{ steps.version.outputs.SemVer }}
+          path: artifacts/release/*
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        uses: ncipollo/release-action@v1
+        with:
+          tag: v${{ steps.version.outputs.SemVer }}
+          commit: ${{ github.sha }}
+          name: WhisperCLI ${{ steps.version.outputs.SemVer }}
+          artifacts: artifacts/release/*
+          artifactErrorsFailBuild: true
+          generateReleaseNotes: true
+          allowUpdates: true
+          makeLatest: true

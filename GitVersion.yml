@@ -1,0 +1,9 @@
+next-version: 1.0.0
+strategies:
+  - ConfiguredNextVersion
+  - Mainline
+branches:
+  main:
+    regex: ^main$
+    increment: Patch
+    label: ''

@@ -11,30 +11,33 @@ WhisperCLI is a command-line tool for transcribing audio from files or microphon
 - Automatic downloading of Whisper models
 - Automatic downloading of FFmpeg
 - Support for different Whisper model sizes (default: LargeV3Turbo)
-- Cross-platform functionality (Windows and Unix)
+- Standalone Windows x64 executable, with optional CUDA acceleration
 - Progress reporting during conversion and transcription
 
 ## Requirements
 
-- .NET 9.0
+- Windows x64 for the published executable; no separate .NET installation is required
+- .NET SDK 10.0.301 for building from source
 
 ## Installation
 
 ### Using Published Release
 
-Download the latest release from the releases page and extract it to your preferred location.
+Download `WhisperCLI-win-x64.exe` from the [latest release](https://github.com/bvdcode/WhisperCLI/releases/latest) and run it from your preferred location. The executable includes the .NET runtime and Whisper native libraries, which are extracted to the system temporary directory on first launch. Models and FFmpeg are downloaded as needed.
+
+`SHA256SUMS` is included in each release to verify the executable's checksum.
 
 ### Building from Source
 
 1. Clone the repository
-2. Navigate to the Sources directory
+2. Use the .NET SDK version pinned in `global.json`
 3. Build the project:
    ```
-   dotnet build
+   dotnet build Sources/WhisperCLI.sln
    ```
 4. Publish the project (optional):
    ```
-   dotnet publish -c Release
+   dotnet publish Sources/WhisperCLI.csproj -p:PublishProfile=FolderProfile
    ```
 
 ## Usage
@@ -48,6 +51,7 @@ WhisperCLI [options] [inputFilePath]
 ### Command Line Options
 
 - `-m, --model`: Model to use for transcription (default: LargeV3Turbo)
+- `-l, --language`: Audio language code, such as `ru` or `en` (default: `auto`)
 - `-i, --microphone-index`: Index of microphone to use for recording (default: 0)
 - `-s, --stop-key`: Key to stop recording when using microphone input (default: Spacebar)
 - `-f, --format`: Output format for file/folder transcription: `srt`, `vtt`, or `txt` (default: `srt`; microphone always writes `txt`)
@@ -60,6 +64,9 @@ WhisperCLI [options] [inputFilePath]
 ```
 # Transcribe an audio file
 WhisperCLI input.mp3
+
+# Transcribe Russian speech
+WhisperCLI -l ru input.mp3
 
 # Transcribe an audio file as plain text
 WhisperCLI -f txt input.mp3
@@ -102,7 +109,7 @@ WhisperCLI -s Enter
 
 ### For File Input
 
-1. The program downloads the specified Whisper model if not already present (stored in your temp directory)
+1. The program downloads the specified Whisper model if not already present (stored in `%LOCALAPPDATA%/WhisperCLI/Models` on Windows)
 2. FFmpeg is downloaded automatically if not already present
 3. The input audio/video file is converted to the proper WAV format using FFmpeg
 4. The audio is processed using the Whisper model
@@ -130,6 +137,12 @@ WhisperCLI -s Enter
 - [Serilog](https://serilog.net/)
 - [CommandLineParser](https://github.com/commandlineparser/commandline)
 - CUDA runtime support (optional for GPU acceleration)
+
+## Builds and Releases
+
+Pushes to `main` run dependency auditing, a Release build, subtitle tests, and a transcription check using the standalone executable. A successful build publishes the executable and its SHA-256 checksum to GitHub Releases. Pull requests run the same validation without publishing a release.
+
+GitVersion 6.7.0 calculates the build version. The release policy starts at `1.0.0` and increments the patch version after the latest stable release tag. Rebuilding an already tagged commit uses its existing version. The same version is embedded in the executable and reported by `--version`.
 
 ## License
 
