@@ -17,7 +17,7 @@ namespace WhisperCLI.Transcribers
         {
             string targetFile = Path.Combine(AppPaths.ConversionsDirectory, $"{Path.GetFileNameWithoutExtension(inputFile.Name)}-{Guid.NewGuid():N}.wav");
             bool isVideo = IsVideoFile(inputFile);
-            var conversion = isVideo
+            IConversion conversion = isVideo
                 ? await FFmpeg.Conversions.FromSnippet.ExtractAudio(inputFile.FullName, targetFile)
                 : await FFmpeg.Conversions.FromSnippet.Convert(inputFile.FullName, targetFile);
 
@@ -43,7 +43,7 @@ namespace WhisperCLI.Transcribers
 
         public async Task<FileInfo> TranscribeAudioAsync(FileInfo inputFile, Task<WhisperProcessor> processorTask, OutputFormat format, CancellationToken token)
         {
-            using var processor = await processorTask.ConfigureAwait(false);
+            await using WhisperProcessor processor = await processorTask.ConfigureAwait(false);
             return await TranscribeAudioAsync(inputFile, processor, format, token);
         }
 
@@ -53,16 +53,10 @@ namespace WhisperCLI.Transcribers
             await using MemoryStream waves = await ConvertToWaveStreamAsync(inputFile);
             List<TranscriptSegment> segments = [];
             Stopwatch sw = Stopwatch.StartNew();
-            string prev = string.Empty;
             _logger.Information("Starting transcription for {inputFile}", inputFile.Name);
-            await foreach (var result in processor.ProcessAsync(waves, token))
+            await foreach (SegmentData result in processor.ProcessAsync(waves, token))
             {
-                if (result.Text == prev)
-                {
-                    continue;
-                }
                 segments.Add(new TranscriptSegment(result.Start, result.End, result.Text));
-                prev = result.Text;
                 _logger.Information("{lang}: {start}->{end}: {text}", result.Language,
                     result.Start.ToString(@"hh\:mm\:ss"), result.End.ToString(@"hh\:mm\:ss"), result.Text);
                 if (token.IsCancellationRequested)
@@ -73,7 +67,7 @@ namespace WhisperCLI.Transcribers
             }
             _logger.Information("Elapsed: {el}", sw.Elapsed.ToString(@"hh\:mm\:ss"));
             string outputFilePath = Path.ChangeExtension(inputFile.FullName, TranscriptFormatter.GetFileExtension(format));
-            File.WriteAllText(outputFilePath, TranscriptFormatter.Format(segments, format), Encoding.UTF8);
+            await File.WriteAllTextAsync(outputFilePath, TranscriptFormatter.Format(segments, format), Encoding.UTF8, token);
             _logger.Information("Transcription complete. Output saved to: {outputFilePath}", outputFilePath);
             return new FileInfo(outputFilePath);
         }

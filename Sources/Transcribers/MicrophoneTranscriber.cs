@@ -21,7 +21,7 @@ namespace WhisperCLI.Transcribers
             await CheckFfmpegAsync(token);
 
             string mp3Path = Path.ChangeExtension(wavPath, ".mp3");
-            var conversion = await FFmpeg.Conversions.FromSnippet.Convert(wavPath, mp3Path);
+            IConversion conversion = await FFmpeg.Conversions.FromSnippet.Convert(wavPath, mp3Path);
             conversion.OnProgress += (sender, args) =>
             {
                 _logger.Information("Transcoding WAV to MP3: {argsPercent}%", args.Percent);
@@ -57,14 +57,14 @@ namespace WhisperCLI.Transcribers
         {
             _logger.Information("Starting microphone recording...");
 
-            var waveIn = new WaveInEvent
+            WaveInEvent waveIn = new()
             {
                 DeviceNumber = _microphoneIndex,
                 WaveFormat = new WaveFormat(16000, 1)
             };
 
             string wavOutputPath = Path.Combine(AppPaths.RecordingsDirectory, "recording-" + DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".wav");
-            using var waveWriter = new WaveFileWriter(wavOutputPath, waveIn.WaveFormat);
+            await using WaveFileWriter waveWriter = new(wavOutputPath, waveIn.WaveFormat);
             waveIn.DataAvailable += (s, a) =>
             {
                 waveWriter.Write(a.Buffer, 0, a.BytesRecorded);
@@ -82,21 +82,15 @@ namespace WhisperCLI.Transcribers
             }
 
             waveIn.StopRecording();
-            waveWriter.Dispose();
+            await waveWriter.DisposeAsync();
             waveIn.Dispose();
 
             _logger.Information("Recording stopped. Transcribing...");
-            using var audioStream = new MemoryStream(File.ReadAllBytes(wavOutputPath));
+            await using FileStream audioStream = File.OpenRead(wavOutputPath);
             List<TranscriptSegment> segments = [];
-            using var processor = await processorTask.ConfigureAwait(false);
-            string prev = string.Empty;
-            await foreach (var res in processor.ProcessAsync(audioStream, token))
+            await using WhisperProcessor processor = await processorTask.ConfigureAwait(false);
+            await foreach (SegmentData res in processor.ProcessAsync(audioStream, token))
             {
-                if (res.Text == prev)
-                {
-                    continue;
-                }
-                prev = res.Text;
                 _logger.Information("{lang}: {start}-{end} — {text}",
                     res.Language,
                     res.Start.ToString(@"hh\:mm\:ss"),
@@ -122,7 +116,7 @@ namespace WhisperCLI.Transcribers
                     
                     try
                     {
-                        var mp3File = await TranscodeWavToMp3Async(wavOutputPath, token);
+                        FileInfo mp3File = await TranscodeWavToMp3Async(wavOutputPath, token);
                         _logger.Information("MP3 file saved to {mp3OutputPath}", mp3File.FullName);
                         string savedMp3Path = Path.Combine(saveDirectory, Path.GetFileName(mp3File.FullName));
                         File.Copy(mp3File.FullName, savedMp3Path, true);

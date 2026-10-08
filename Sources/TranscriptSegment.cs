@@ -1,4 +1,4 @@
 namespace WhisperCLI
 {
-    internal sealed record TranscriptSegment(TimeSpan Start, TimeSpan End, string Text);
+    internal record TranscriptSegment(TimeSpan Start, TimeSpan End, string Text);
 }

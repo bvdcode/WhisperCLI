@@ -136,9 +136,9 @@ namespace WhisperCLI
 
         private static void Exec(string cmd)
         {
-            var escapedArgs = cmd.Replace("\"", "\\\"");
+            string escapedArgs = cmd.Replace("\"", "\\\"");
 
-            using var process = new System.Diagnostics.Process
+            using System.Diagnostics.Process process = new()
             {
                 StartInfo = new System.Diagnostics.ProcessStartInfo
                 {

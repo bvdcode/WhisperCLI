@@ -23,8 +23,7 @@ namespace WhisperCLI
 
         public static string Finalize(string text)
         {
-            string normalized = MultipleSpacesRegex().Replace(text.Trim(), " ");
-            normalized = SpaceBeforePunctuationRegex().Replace(normalized, "$1");
+            string normalized = Normalize(text);
 
             if (normalized.Length == 0 || EndsWithSentencePunctuation(normalized))
             {
@@ -75,7 +74,7 @@ namespace WhisperCLI
                 builder.Append(FormatSrtTimestamp(segment.Start));
                 builder.Append(" --> ");
                 builder.AppendLine(FormatSrtTimestamp(segment.End));
-                builder.AppendLine(Finalize(segment.Text));
+                builder.AppendLine(Normalize(segment.Text));
                 builder.AppendLine();
             }
 
@@ -93,7 +92,7 @@ namespace WhisperCLI
                 builder.Append(FormatWebVttTimestamp(segment.Start));
                 builder.Append(" --> ");
                 builder.AppendLine(FormatWebVttTimestamp(segment.End));
-                builder.AppendLine(Finalize(segment.Text));
+                builder.AppendLine(Normalize(segment.Text));
                 builder.AppendLine();
             }
 
@@ -103,6 +102,12 @@ namespace WhisperCLI
         private static string FormatSrtTimestamp(TimeSpan value)
         {
             return value.ToString(@"hh\:mm\:ss\,fff");
+        }
+
+        private static string Normalize(string text)
+        {
+            string normalized = MultipleSpacesRegex().Replace(text.Trim(), " ");
+            return SpaceBeforePunctuationRegex().Replace(normalized, "$1");
         }
 
         private static string FormatWebVttTimestamp(TimeSpan value)
