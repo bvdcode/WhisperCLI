@@ -60,6 +60,7 @@ WhisperCLI [options] [inputFilePath]
 - `-f, --format`: Output format for file/folder transcription: `srt`, `vtt`, or `txt` (default: `srt`; microphone always writes `txt`)
 - `--folder`: Process all media files in the specified folder
 - `-r, --recursive`: Include subfolders when using `--folder`
+- `--update`: Download the latest stable GitHub Release and replace the running Windows executable after exit
 - `inputFilePath`: Path to the audio/video file or folder to transcribe (if omitted without `--folder`, uses microphone input)
 
 ### Examples
@@ -107,6 +108,18 @@ WhisperCLI -s Enter
 - LargeV2
 - LargeV3
 - LargeV3Turbo (default)
+
+### Updating
+
+Run the installed executable with `--update`:
+
+```
+WhisperCLI-win-x64.exe --update
+```
+
+The updater compares the installed version with the latest stable GitHub Release. If a newer version is available, it checks the download size, GitHub's SHA-256 digest, product name, and version before replacing the executable. The original filename and installation directory are preserved. Models, recordings, and transcripts are retained.
+
+The installation folder must be writable. On Windows, a hidden PowerShell helper applies the update after the application exits. Its result is recorded beside the executable in `<executable>.update.log`. Network or checksum failures do not change the installed executable. Use `--update` without a media file or `--folder`.
 
 ## How It Works
 

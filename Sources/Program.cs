@@ -83,6 +83,12 @@ namespace WhisperCLI
                 .MinimumLevel.Is(options.Verbose ? LogEventLevel.Debug : LogEventLevel.Information)
                 .WriteTo.Console()
                 .CreateLogger();
+            if (options.Update)
+            {
+                Environment.ExitCode = await Updates.UpdateCommand.RunAsync(options, logger, cts.Token);
+                return;
+            }
+
             LogProvider.AddLogger((level, text) =>
             {
                 if (!string.IsNullOrWhiteSpace(text))
