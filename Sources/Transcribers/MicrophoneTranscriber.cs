@@ -91,6 +91,12 @@ namespace WhisperCLI.Transcribers
             await using WhisperProcessor processor = await processorTask.ConfigureAwait(false);
             await foreach (SegmentData res in processor.ProcessAsync(audioStream, token))
             {
+                if (TranscriptPhraseFilter.IsExcluded(res.Text))
+                {
+                    _logger.Debug("Skipping excluded transcript phrase: {text}", res.Text);
+                    continue;
+                }
+
                 _logger.Information("{lang}: {start}-{end} — {text}",
                     res.Language,
                     res.Start.ToString(@"hh\:mm\:ss"),

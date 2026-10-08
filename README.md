@@ -13,6 +13,9 @@ WhisperCLI is a command-line tool for transcribing audio from files or microphon
 - Support for different Whisper model sizes (default: LargeV3Turbo)
 - Standalone Windows x64 executable, with optional CUDA acceleration
 - Progress reporting during conversion and transcription
+- Exclude standalone phrases from the built-in dictionary in file and microphone transcripts
+
+The exclusion dictionary currently contains `Продолжение следует`. Matching ignores capitalization, punctuation, and extra whitespace. A segment is omitted only when its entire text matches the phrase; sentences containing other words are preserved. A genuinely spoken standalone phrase from this dictionary is also omitted.
 
 ## Requirements
 

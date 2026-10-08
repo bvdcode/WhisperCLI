@@ -56,6 +56,12 @@ namespace WhisperCLI.Transcribers
             _logger.Information("Starting transcription for {inputFile}", inputFile.Name);
             await foreach (SegmentData result in processor.ProcessAsync(waves, token))
             {
+                if (TranscriptPhraseFilter.IsExcluded(result.Text))
+                {
+                    _logger.Debug("Skipping excluded transcript phrase: {text}", result.Text);
+                    continue;
+                }
+
                 segments.Add(new TranscriptSegment(result.Start, result.End, result.Text));
                 _logger.Information("{lang}: {start}->{end}: {text}", result.Language,
                     result.Start.ToString(@"hh\:mm\:ss"), result.End.ToString(@"hh\:mm\:ss"), result.Text);
