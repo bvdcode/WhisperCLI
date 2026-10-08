@@ -55,8 +55,8 @@ namespace WhisperCLI.Tests
         }
 
         [TestCase("https://example.com/WhisperCLI.exe")]
-        [TestCase("https://github.com/another/repository/releases/download/v1.2.3/WhisperCLI-win-x64.exe")]
-        [TestCase("http://github.com/bvdcode/WhisperCLI/releases/download/v1.2.3/WhisperCLI-win-x64.exe")]
+        [TestCase("https://github.com/another/repository/releases/download/v1.2.3/WhisperCLI.exe")]
+        [TestCase("http://github.com/bvdcode/WhisperCLI/releases/download/v1.2.3/WhisperCLI.exe")]
         public void AssetOutsideTheExpectedReleaseIsRejected(string url)
         {
             using HttpClient http = new(new ReleaseHttpHandler(ReleaseTestData.Metadata("1.2.3", 4, Digest, url), Payload));

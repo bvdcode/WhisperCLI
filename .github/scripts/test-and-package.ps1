@@ -8,6 +8,7 @@ $ErrorActionPreference = "Stop"
 $repositoryRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "../.."))
 $publishDirectory = Join-Path $repositoryRoot "artifacts/publish/win-x64"
 $releaseDirectory = Join-Path $repositoryRoot "artifacts/release"
+$executableName = "WhisperCLI.exe"
 $versionProperties = @(
     "-p:Version=$Version",
     "-p:AssemblyVersion=$AssemblyVersion",
@@ -31,8 +32,8 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "Windows publication failed." }
 
     New-Item -ItemType Directory -Path $releaseDirectory -Force | Out-Null
-    $executable = Join-Path $releaseDirectory "WhisperCLI-win-x64.exe"
-    Copy-Item -LiteralPath (Join-Path $publishDirectory "WhisperCLI.exe") -Destination $executable -Force
+    $executable = Join-Path $releaseDirectory $executableName
+    Copy-Item -LiteralPath (Join-Path $publishDirectory $executableName) -Destination $executable -Force
 
     $metadata = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($executable)
     if ($metadata.ProductVersion -ne $Version -or $metadata.FileVersion -ne $FileVersion) {
@@ -48,7 +49,7 @@ try {
     & (Join-Path $PSScriptRoot "test-executable.ps1") -Executable $executable -OutputDirectory (Join-Path $repositoryRoot "artifacts/smoke")
 
     $checksum = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant()
-    Set-Content -LiteralPath (Join-Path $releaseDirectory "SHA256SUMS") -Value "$checksum  WhisperCLI-win-x64.exe" -Encoding utf8NoBOM
+    Set-Content -LiteralPath (Join-Path $releaseDirectory "SHA256SUMS") -Value "$checksum  $executableName" -Encoding utf8NoBOM
 }
 finally {
     Pop-Location

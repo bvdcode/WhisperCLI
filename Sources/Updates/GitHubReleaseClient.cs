@@ -5,7 +5,7 @@ namespace WhisperCLI.Updates
 {
     internal class GitHubReleaseClient(HttpClient httpClient)
     {
-        public const string AssetName = "WhisperCLI-win-x64.exe";
+        public const string AssetName = "WhisperCLI.exe";
         private const string Repository = "bvdcode/WhisperCLI";
         private const string Sha256Prefix = "sha256:";
         private static readonly Uri LatestReleaseUrl = new($"https://api.github.com/repos/{Repository}/releases/latest");

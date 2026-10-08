@@ -26,7 +26,7 @@ The exclusion dictionary currently contains `Продолжение следуе
 
 ### Using Published Release
 
-Download `WhisperCLI-win-x64.exe` from the [latest release](https://github.com/bvdcode/WhisperCLI/releases/latest) and run it from your preferred location. The executable includes the .NET runtime and Whisper native libraries, which are extracted to the system temporary directory on first launch. Models and FFmpeg are downloaded as needed.
+Download `WhisperCLI.exe` from the [latest release](https://github.com/bvdcode/WhisperCLI/releases/latest) and run it from your preferred location. The executable includes the .NET runtime and Whisper native libraries, which are extracted to the system temporary directory on first launch. Models and FFmpeg are downloaded as needed.
 
 `SHA256SUMS` is included in each release to verify the executable's checksum.
 
@@ -114,12 +114,14 @@ WhisperCLI -s Enter
 Run the installed executable with `--update`:
 
 ```
-WhisperCLI-win-x64.exe --update
+WhisperCLI.exe --update
 ```
 
 The updater compares the installed version with the latest stable GitHub Release. If a newer version is available, it checks the download size, GitHub's SHA-256 digest, product name, and version before replacing the executable. The original filename and installation directory are preserved. Models, recordings, and transcripts are retained.
 
 The installation folder must be writable. On Windows, a hidden PowerShell helper applies the update after the application exits. Its result is recorded beside the executable in `<executable>.update.log`. Network or checksum failures do not change the installed executable. Use `--update` without a media file or `--folder`.
+
+Versions through 1.0.2 require a manual download to adopt the current release executable name.
 
 ## How It Works
 
