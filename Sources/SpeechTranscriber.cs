@@ -47,11 +47,12 @@ namespace WhisperCLI
                 {
                     languageSample = chunks.MaxBy(c => c.Length);
                 }
-                string? language = processor.DetectLanguage(samples.AsSpan(languageSample.Start, languageSample.Length).ToArray());
+                int languageSampleLength = Math.Min(languageSample.Length, 30 * SpeechChunker.SampleRate);
+                string? language = processor.DetectLanguage(samples.AsSpan(languageSample.Start, languageSampleLength).ToArray());
                 processor.ChangeLanguage(language ?? "auto");
                 logger.Information("Detected recording language: {language}", language ?? "auto");
             }
-            logger.Information("Transcribing {count} speech chunks (at most 30 seconds each).", chunks.Count);
+            logger.Information("Transcribing {count} speech regions; continuous speech is passed intact to Whisper.", chunks.Count);
             foreach (AudioChunk chunk in chunks)
             {
                 token.ThrowIfCancellationRequested();

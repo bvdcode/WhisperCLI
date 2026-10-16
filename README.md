@@ -14,7 +14,7 @@ WhisperCLI is a command-line tool for transcribing audio from files or microphon
 - Standalone Windows x64 and Linux x64 executables, with optional CUDA acceleration
 - Progress reporting during conversion and transcription
 - Exclude standalone phrases from the built-in dictionary in file and microphone transcripts
-- Detect speech with Silero VAD and transcribe independent chunks of at most 30 seconds, preserving source timestamps
+- Detect speech with Silero VAD and preserve continuous speech regions and source timestamps
 
 The exclusion dictionary currently contains `Продолжение следует` and the credit variants `Субтитры создавал DimaTorzok`, `Субтитры сделал DimaTorzok`, and `Субтитры делал DimaTorzok`. Matching ignores capitalization, punctuation, and extra whitespace. A segment is omitted only when its entire text matches the phrase; sentences containing other words are preserved. A genuinely spoken standalone phrase from this dictionary is also omitted.
 
@@ -61,7 +61,7 @@ WhisperCLI [options] [inputFilePath]
 - `-l, --language`: Audio language code, such as `ru` or `en` (default: `auto`)
 - `--beam-size`: Decoding candidates, from 1 to 16 (default: 5). Use 1 for faster greedy decoding
 - `--vad-threshold`: Speech detection probability threshold between 0 and 1 (default: 0.5). Lower values retain more quiet speech
-- `--no-vad`: Disable speech detection for comparison or difficult audio. Processing still uses chunks of at most 30 seconds
+- `--no-vad`: Disable speech detection for comparison or difficult audio. The entire recording, including pauses, is passed to Whisper
 - `-i, --microphone-index`: Index of microphone to use for recording (default: 0)
 - `-s, --stop-key`: Key to stop recording when using microphone input (default: Spacebar)
 - `-f, --format`: Output format for file/folder transcription: `srt`, `vtt`, or `txt` (default: `srt`; microphone always writes `txt`)
@@ -145,10 +145,10 @@ Versions through 1.0.2 require a manual download to adopt the current release ex
 1. The program downloads the specified Whisper model if not already present (stored in `%LOCALAPPDATA%/WhisperCLI/Models` on Windows)
 2. FFmpeg is downloaded automatically if not already present
 3. The input audio/video file is converted to 16 kHz mono PCM WAV using FFmpeg
-4. Silero VAD detects speech; padded speech regions are grouped into independent chunks of at most 30 seconds and processed using Whisper. Original audio positions are retained in subtitle timestamps
+4. Silero VAD detects speech; overlapping or nearby padded regions are merged and passed intact to Whisper, without a duration limit. Whisper manages its own decoding windows. Original audio positions are retained in subtitle timestamps
 5. The transcription is saved in the selected output format in the same location as the input file
 
-The small Silero VAD model (`ggml-silero-v6.2.0.bin`) is downloaded to the same model cache on first use. Speech detection runs on the CPU. Each decoding chunk starts with fresh transcription context. No instructional prompt is supplied: Whisper can copy such instructions into the transcript. With `-l auto`, the language is detected once per recording from a speech region and retained across its chunks. Temperature fallback remains enabled. These measures reduce silence hallucinations and prevent erroneous text from propagating through an entire recording, but do not guarantee perfect words or punctuation. Review unfamiliar names and specialist terminology. Use `--no-vad` to investigate missed speech; it increases the risk of text generated during pauses.
+The small Silero VAD model (`ggml-silero-v6.2.0.bin`) is downloaded to the same model cache on first use. Speech detection runs on the CPU with no maximum speech duration; the application does not force cuts through continuous speech. Native text-history conditioning is disabled (`WithMaxLastTextTokens(0)`) so a mistaken phrase or punctuation style is not carried into later decoding windows. No instructional prompt is supplied: Whisper can copy such instructions into the transcript. With `-l auto`, the language is detected once per recording from up to 30 seconds of a speech region and retained for transcription. Temperature fallback remains enabled. These measures reduce silence hallucinations and repeated text, but do not guarantee perfect words or punctuation. VAD can still miss quiet speech; use `--vad-threshold` to adjust sensitivity or `--no-vad` to compare the entire recording without speech detection.
 
 ### For Folder Input
 

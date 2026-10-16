@@ -3,7 +3,6 @@ namespace WhisperCLI
     internal static class SpeechChunker
     {
         internal const int SampleRate = 16000;
-        internal const int MaxChunkSamples = 30 * SampleRate;
 
         // Keep the original sample positions: removing silence must not shift subtitle timestamps.
         public static IReadOnlyList<AudioChunk> Create(int sampleCount, IEnumerable<AudioChunk> speech)
@@ -30,22 +29,15 @@ namespace WhisperCLI
                 if (chunks.Count > 0)
                 {
                     AudioChunk previous = chunks[^1];
-                    if (start - previous.End <= SampleRate && end - previous.Start <= MaxChunkSamples)
+                    if (start - previous.End <= SampleRate)
                     {
                         chunks[^1] = previous with { End = Math.Max(previous.End, end) };
                         continue;
                     }
-
-                    // VAD padding may overlap at a forced split. Decode that audio only once.
-                    start = Math.Max(start, previous.End);
                 }
 
-                while (start < end)
-                {
-                    int chunkEnd = Math.Min(end, start + MaxChunkSamples);
-                    chunks.Add(new AudioChunk(start, chunkEnd));
-                    start = chunkEnd;
-                }
+                // Keep continuous speech intact; Whisper advances its own decoding windows.
+                chunks.Add(new AudioChunk(start, end));
             }
 
             return chunks;

@@ -14,6 +14,8 @@ namespace WhisperCLI
                 .CreateBuilder()
                 .WithLanguage(language)
                 .WithNoContext()
+                // NoContext alone does not disable rolling text history within a processing call.
+                .WithMaxLastTextTokens(0)
                 .WithTemperature(0f);
             if (beamSize > 1)
             {
@@ -32,7 +34,6 @@ namespace WhisperCLI
                 .WithThreshold(threshold)
                 .WithMinSpeechDuration(TimeSpan.FromMilliseconds(100))
                 .WithMinSilenceDuration(TimeSpan.FromMilliseconds(500))
-                .WithMaxSpeechDuration(TimeSpan.FromSeconds(28))
                 .WithSpeechPadding(TimeSpan.FromMilliseconds(250))
                 .Build();
         }

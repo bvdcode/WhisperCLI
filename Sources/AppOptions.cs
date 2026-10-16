@@ -43,7 +43,7 @@ namespace WhisperCLI
         [Option("beam-size", Required = false, Default = 5, HelpText = "Number of decoding candidates. Default is 5; use 1 for faster greedy decoding. Range: 1-16.")]
         public int BeamSize { get; set; } = 5;
 
-        [Option("no-vad", Required = false, Default = false, HelpText = "Disable speech detection and transcribe pauses too. Audio is still processed in chunks of at most 30 seconds.")]
+        [Option("no-vad", Required = false, Default = false, HelpText = "Disable speech detection and pass the entire recording to Whisper, including pauses.")]
         public bool NoVad { get; set; }
 
         [Option("vad-threshold", Required = false, Default = 0.5f, HelpText = "Speech detection probability threshold between 0 and 1. Default is 0.5; lower values retain more quiet speech.")]

@@ -15,17 +15,17 @@ namespace WhisperCLI.Tests
         }
 
         [Test]
-        public void NearbySpeechIsGroupedWithoutExceedingThirtySeconds()
+        public void NearbySpeechStaysIntactBeyondThirtySeconds()
         {
             var chunks = SpeechChunker.Create(60 * Rate, [new(0, 10 * Rate), new(11 * Rate, 20 * Rate), new(21 * Rate, 40 * Rate)]);
-            Assert.That(chunks, Is.EqualTo(new AudioChunk[] { new(0, 20 * Rate), new(21 * Rate, 40 * Rate) }));
+            Assert.That(chunks, Is.EqualTo(new AudioChunk[] { new(0, 40 * Rate) }));
         }
 
         [Test]
-        public void OverlappingPaddingDoesNotDuplicateSamples()
+        public void OverlappingSpeechIsMergedWithoutCuttingEitherRegion()
         {
             var chunks = SpeechChunker.Create(60 * Rate, [new(0, 29 * Rate), new(28 * Rate, 55 * Rate)]);
-            Assert.That(chunks, Is.EqualTo(new AudioChunk[] { new(0, 29 * Rate), new(29 * Rate, 55 * Rate) }));
+            Assert.That(chunks, Is.EqualTo(new AudioChunk[] { new(0, 55 * Rate) }));
         }
 
         [Test]
@@ -49,10 +49,10 @@ namespace WhisperCLI.Tests
         }
 
         [Test]
-        public void UnfilteredAudioIsStillBoundedAndFullyCovered()
+        public void UnfilteredAudioIsPassedWholeWithoutArtificialBoundaries()
         {
             var chunks = SpeechChunker.Create(65 * Rate, [new(0, 65 * Rate)]);
-            Assert.That(chunks, Is.EqualTo(new AudioChunk[] { new(0, 30 * Rate), new(30 * Rate, 60 * Rate), new(60 * Rate, 65 * Rate) }));
+            Assert.That(chunks, Is.EqualTo(new AudioChunk[] { new(0, 65 * Rate) }));
         }
     }
 }
