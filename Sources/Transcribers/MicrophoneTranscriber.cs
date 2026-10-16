@@ -10,6 +10,8 @@ namespace WhisperCLI.Transcribers
     {
         private readonly ILogger _logger;
         private readonly int _microphoneIndex;
+        private readonly WhisperVadProcessor? _vad;
+        private readonly bool _detectLanguage;
 
         private async Task CheckFfmpegAsync(CancellationToken token)
         {
@@ -30,10 +32,12 @@ namespace WhisperCLI.Transcribers
             return new FileInfo(mp3Path);
         }
 
-        public MicrophoneTranscriber(ILogger logger, int microphoneIndex)
+        public MicrophoneTranscriber(ILogger logger, int microphoneIndex, WhisperVadProcessor? vad = null, bool detectLanguage = false)
         {
             _logger = logger;
             _microphoneIndex = microphoneIndex;
+            _vad = vad;
+            _detectLanguage = detectLanguage;
             _logger.Information("Available audio input devices: {deviceCount}", WaveInEvent.DeviceCount);
             if (WaveInEvent.DeviceCount == 0)
             {
@@ -89,24 +93,9 @@ namespace WhisperCLI.Transcribers
             await using FileStream audioStream = File.OpenRead(wavOutputPath);
             List<TranscriptSegment> segments = [];
             await using WhisperProcessor processor = await processorTask.ConfigureAwait(false);
-            await foreach (SegmentData res in processor.ProcessAsync(audioStream, token))
+            await foreach (TranscriptSegment segment in SpeechTranscriber.ProcessAsync(audioStream, processor, _vad, _logger, token, _detectLanguage))
             {
-                if (TranscriptPhraseFilter.IsExcluded(res.Text))
-                {
-                    _logger.Debug("Skipping excluded transcript phrase: {text}", res.Text);
-                    continue;
-                }
-
-                _logger.Information("{lang}: {start}-{end} — {text}",
-                    res.Language,
-                    res.Start.ToString(@"hh\:mm\:ss"),
-                    res.End.ToString(@"hh\:mm\:ss"),
-                    res.Text);
-                segments.Add(new TranscriptSegment(res.Start, res.End, res.Text));
-                if (token.IsCancellationRequested)
-                {
-                    break;
-                }
+                segments.Add(segment);
             }
             _logger.Information("Transcription completed - wave file saved to {wavOutputPath}", wavOutputPath);
             if (segments.Count > 0)

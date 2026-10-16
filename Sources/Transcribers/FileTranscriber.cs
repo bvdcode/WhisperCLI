@@ -6,14 +6,14 @@ using Xabe.FFmpeg;
 
 namespace WhisperCLI.Transcribers
 {
-    public class FileTranscriber(ILogger _logger)
+    public class FileTranscriber(ILogger _logger, WhisperVadProcessor? vad = null, bool detectLanguage = false)
     {
         private async Task CheckFfmpegAsync(CancellationToken token)
         {
             await FFmpegBootstrapper.EnsureAvailableAsync(_logger, token).ConfigureAwait(false);
         }
 
-        private async Task<MemoryStream> ConvertToWaveStreamAsync(FileInfo inputFile)
+        private async Task<MemoryStream> ConvertToWaveStreamAsync(FileInfo inputFile, CancellationToken token)
         {
             string targetFile = Path.Combine(AppPaths.ConversionsDirectory, $"{Path.GetFileNameWithoutExtension(inputFile.Name)}-{Guid.NewGuid():N}.wav");
             bool isVideo = IsVideoFile(inputFile);
@@ -21,15 +21,15 @@ namespace WhisperCLI.Transcribers
                 ? await FFmpeg.Conversions.FromSnippet.ExtractAudio(inputFile.FullName, targetFile)
                 : await FFmpeg.Conversions.FromSnippet.Convert(inputFile.FullName, targetFile);
 
-            conversion.AddParameter("-ar 16000", ParameterPosition.PostInput);
+            conversion.AddParameter("-ar 16000 -ac 1 -c:a pcm_s16le", ParameterPosition.PostInput);
             conversion.OnProgress += (sender, args) =>
             {
                 _logger.Information("Converting media to wave: {argsPercent}%", args.Percent);
             };
             try
             {
-                await conversion.Start();
-                byte[] bytes = await File.ReadAllBytesAsync(targetFile);
+                await conversion.Start(token);
+                byte[] bytes = await File.ReadAllBytesAsync(targetFile, token);
                 return new MemoryStream(bytes);
             }
             finally
@@ -50,26 +50,13 @@ namespace WhisperCLI.Transcribers
         public async Task<FileInfo> TranscribeAudioAsync(FileInfo inputFile, WhisperProcessor processor, OutputFormat format, CancellationToken token)
         {
             await CheckFfmpegAsync(token);
-            await using MemoryStream waves = await ConvertToWaveStreamAsync(inputFile);
+            await using MemoryStream waves = await ConvertToWaveStreamAsync(inputFile, token);
             List<TranscriptSegment> segments = [];
             Stopwatch sw = Stopwatch.StartNew();
             _logger.Information("Starting transcription for {inputFile}", inputFile.Name);
-            await foreach (SegmentData result in processor.ProcessAsync(waves, token))
+            await foreach (TranscriptSegment result in SpeechTranscriber.ProcessAsync(waves, processor, vad, _logger, token, detectLanguage))
             {
-                if (TranscriptPhraseFilter.IsExcluded(result.Text))
-                {
-                    _logger.Debug("Skipping excluded transcript phrase: {text}", result.Text);
-                    continue;
-                }
-
-                segments.Add(new TranscriptSegment(result.Start, result.End, result.Text));
-                _logger.Information("{lang}: {start}->{end}: {text}", result.Language,
-                    result.Start.ToString(@"hh\:mm\:ss"), result.End.ToString(@"hh\:mm\:ss"), result.Text);
-                if (token.IsCancellationRequested)
-                {
-                    _logger.Information("Cancellation requested - stopping recognition");
-                    break;
-                }
+                segments.Add(result);
             }
             _logger.Information("Elapsed: {el}", sw.Elapsed.ToString(@"hh\:mm\:ss"));
             string outputFilePath = TranscriptFormatter.GetOutputPath(inputFile, format);

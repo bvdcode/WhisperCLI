@@ -40,6 +40,15 @@ namespace WhisperCLI
         [Option('l', "language", Required = false, Default = "auto", HelpText = "Language of the audio input. Default is 'auto'. Specify a language code (e.g., 'en' for English) to force a specific language.")]
         public string Language { get; set; } = "auto";
 
+        [Option("beam-size", Required = false, Default = 5, HelpText = "Number of decoding candidates. Default is 5; use 1 for faster greedy decoding. Range: 1-16.")]
+        public int BeamSize { get; set; } = 5;
+
+        [Option("no-vad", Required = false, Default = false, HelpText = "Disable speech detection and transcribe pauses too. Audio is still processed in chunks of at most 30 seconds.")]
+        public bool NoVad { get; set; }
+
+        [Option("vad-threshold", Required = false, Default = 0.5f, HelpText = "Speech detection probability threshold between 0 and 1. Default is 0.5; lower values retain more quiet speech.")]
+        public float VadThreshold { get; set; } = 0.5f;
+
         [Option('f', "format", Required = false, Default = OutputFormat.Srt, HelpText = "Output format for file/folder transcription: srt, vtt, or txt. Default is srt. Microphone transcription always writes txt.")]
         public OutputFormat Format { get; set; } = OutputFormat.Srt;
 

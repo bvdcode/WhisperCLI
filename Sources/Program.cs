@@ -40,6 +40,13 @@ namespace WhisperCLI
                 return;
             }
 
+            if (options.BeamSize is < 1 or > 16 || !(options.VadThreshold > 0 && options.VadThreshold < 1))
+            {
+                logger.Error("--beam-size must be between 1 and 16; --vad-threshold must be between 0 and 1.");
+                Environment.ExitCode = 1;
+                return;
+            }
+
             LogProvider.AddLogger((level, text) =>
             {
                 if (!string.IsNullOrWhiteSpace(text))
@@ -123,20 +130,21 @@ namespace WhisperCLI
             }
 
             FileInfo whisperModelInfo = await GetWhisperModelPathAsync(options.Model, logger, cts.Token);
-            Task<WhisperProcessor> processorTask = CreateProcessorAsync(options.Model, whisperModelInfo, logger, options.Language, cts.Token);
+            await using WhisperVadProcessor? vad = options.NoVad ? null : await CreateVadAsync(options.VadThreshold, logger, cts.Token);
+            Task<WhisperProcessor> processorTask = CreateProcessorAsync(options.Model, whisperModelInfo, logger, options.Language, options.BeamSize, cts.Token);
             List<FileInfo> results = [];
             try
             {
                 if (inputFiles.Count == 0)
                 {
                     logger.Information("Press {stopKey} to stop recording.", options.StopKey);
-                    FileInfo result = await new MicrophoneTranscriber(logger, options.MicrophoneIndex)
+                    FileInfo result = await new MicrophoneTranscriber(logger, options.MicrophoneIndex, vad, options.Language == "auto")
                         .TranscribeAudioAsync(processorTask, options.SaveTranscript, OutputFormat.Txt, () => CheckCancellation(options.StopKey), cts.Token);
                     results.Add(result);
                 }
                 else
                 {
-                    results.AddRange(await TranscribeFilesAsync(inputFiles, processorTask, options.Format, folderMode, logger, cts.Token));
+                    results.AddRange(await TranscribeFilesAsync(inputFiles, processorTask, vad, options.Language == "auto", options.Format, folderMode, logger, cts.Token));
                 }
                 if (results.Count == 1 && options.OpenTextFile)
                 {
@@ -167,7 +175,7 @@ namespace WhisperCLI
 
                 await DelayBeforeExitAsync(options, cts.Token);
             }
-            catch (TaskCanceledException)
+            catch (OperationCanceledException)
             {
                 logger.Information("Operation canceled by user.");
             }
@@ -217,6 +225,8 @@ namespace WhisperCLI
         private static async Task<List<FileInfo>> TranscribeFilesAsync(
             IReadOnlyList<FileInfo> inputFiles,
             Task<WhisperProcessor> processorTask,
+            WhisperVadProcessor? vad,
+            bool detectLanguage,
             OutputFormat format,
             bool skipExisting,
             Logger logger,
@@ -224,7 +234,7 @@ namespace WhisperCLI
         {
             List<FileInfo> results = [];
             await using WhisperProcessor processor = await processorTask.ConfigureAwait(false);
-            FileTranscriber transcriber = new(logger);
+            FileTranscriber transcriber = new(logger, vad, detectLanguage);
             for (int i = 0; i < inputFiles.Count; i++)
             {
                 FileInfo inputFile = inputFiles[i];
@@ -310,9 +320,22 @@ namespace WhisperCLI
             }
         }
 
-        private static async Task<FileInfo> GetWhisperModelPathAsync(GgmlType model, Logger logger, CancellationToken token)
+        private static Task<FileInfo> GetWhisperModelPathAsync(GgmlType model, Logger logger, CancellationToken token)
         {
             string modelName = $"ggml-{model.ToString().ToLower()}.bin";
+            return GetModelFileAsync(modelName,
+                () => WhisperGgmlDownloader.Default.GetGgmlModelAsync(model, cancellationToken: token), logger, token);
+        }
+
+        private static async Task<WhisperVadProcessor> CreateVadAsync(float threshold, Logger logger, CancellationToken token)
+        {
+            FileInfo model = await GetModelFileAsync("ggml-silero-v6.2.0.bin",
+                () => WhisperGgmlDownloader.Default.GetGgmlSileroVadModelAsync(SileroVadType.V6_2_0, token), logger, token);
+            return WhisperProcessorFactory.CreateVad(model, threshold, logger);
+        }
+
+        private static async Task<FileInfo> GetModelFileAsync(string modelName, Func<Task<Stream>> download, Logger logger, CancellationToken token)
+        {
             string filePath = Path.Combine(AppPaths.ModelsDirectory, modelName);
             string partialPath = filePath + ".tmp";
 
@@ -330,8 +353,8 @@ namespace WhisperCLI
                 return fileInfo;
             }
 
-            logger.Information("Downloading model: {model}", model);
-            await using (Stream modelStream = await WhisperGgmlDownloader.Default.GetGgmlModelAsync(model, cancellationToken: token))
+            logger.Information("Downloading model: {model}", modelName);
+            await using (Stream modelStream = await download())
             await using (FileStream fileWriter = File.Create(partialPath))
             {
                 await CopyWithProgressAsync(modelStream, fileWriter, logger, token);
@@ -377,20 +400,20 @@ namespace WhisperCLI
             logger.Information("Download complete: {mb:0.0} MB", totalBytes / 1048576.0);
         }
 
-        private static async Task<WhisperProcessor> CreateProcessorAsync(GgmlType model, FileInfo whisperModelInfo, Logger logger, string language, CancellationToken token)
+        private static async Task<WhisperProcessor> CreateProcessorAsync(GgmlType model, FileInfo whisperModelInfo, Logger logger, string language, int beamSize, CancellationToken token)
         {
             logger.Information("Creating WhisperProcessor with language: {language}, model: {model}...", language, model);
 
             try
             {
-                return await Task.Run(() => WhisperProcessorFactory.Create(whisperModelInfo, language, logger, model), token).ConfigureAwait(false);
+                return await Task.Run(() => WhisperProcessorFactory.Create(whisperModelInfo, language, logger, model, beamSize), token).ConfigureAwait(false);
             }
             catch (WhisperModelLoadException ex)
             {
                 logger.Warning(ex, "Model load failed — file may be corrupt. Removing and re-downloading: {filePath}", whisperModelInfo.FullName);
                 File.Delete(whisperModelInfo.FullName);
                 whisperModelInfo = await GetWhisperModelPathAsync(model, logger, token).ConfigureAwait(false);
-                return await Task.Run(() => WhisperProcessorFactory.Create(whisperModelInfo, language, logger, model), token).ConfigureAwait(false);
+                return await Task.Run(() => WhisperProcessorFactory.Create(whisperModelInfo, language, logger, model, beamSize), token).ConfigureAwait(false);
             }
         }
     }

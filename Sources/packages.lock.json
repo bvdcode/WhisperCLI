@@ -59,30 +59,30 @@
       },
       "Whisper.net": {
         "type": "Direct",
-        "requested": "[1.9.0, )",
-        "resolved": "1.9.0",
-        "contentHash": "oIDi3oa+EYQgPdAsGxEZJmheUuyHI8imN4GUE0rA2xme38uiImE8pqJNYvKsseug3+2Dp9dOud38fl159kROIA==",
+        "requested": "[1.9.1, )",
+        "resolved": "1.9.1",
+        "contentHash": "82WAKyyMun44cAXE80sP7vIra1oYhbVp2WrnqJm0CISTfMAvint1k/umt0SvsQH+IkDyekZ3BgMdS3Rag9SZ5A==",
         "dependencies": {
-          "Microsoft.Extensions.AI.Abstractions": "10.0.0"
+          "Microsoft.Extensions.AI.Abstractions": "10.2.0"
         }
       },
       "Whisper.net.Runtime": {
         "type": "Direct",
-        "requested": "[1.9.0, )",
-        "resolved": "1.9.0",
-        "contentHash": "Fl+kWm+7/EA+Q0KsYrWZlS42MHOxYVK96VpBZy0yLWMwMFwSSMiXzCxosxSm8vSVhYuqGeBK4IOOLTL9FSTsZg==",
+        "requested": "[1.9.1, )",
+        "resolved": "1.9.1",
+        "contentHash": "TipPJkry69VwJ3XL38U082QK5Trqte6NgSOoosuyj/C1eRHabmBbLQ3ujjcDryg5pkXT7wXwAKU5+PxGIJyxkQ==",
         "dependencies": {
-          "Whisper.net.Runtime.Metal": "1.9.0"
+          "Whisper.net.Runtime.Metal": "1.9.1"
         }
       },
       "Whisper.net.Runtime.Cuda": {
         "type": "Direct",
-        "requested": "[1.9.0, )",
-        "resolved": "1.9.0",
-        "contentHash": "mJEN4UHK88CXJaDYb8ctvu3B9/afqqchOwnJlajWbVDTRXDXVY4vytdtAGfN/Hv29YyUC5bWnnTOZINIIpfDtw==",
+        "requested": "[1.9.1, )",
+        "resolved": "1.9.1",
+        "contentHash": "OB9XodXWGGNrCgn6rdbyNXg2NuNQtry2H2dSFc5a26KOdNf6QL3tcfhe6VVwTdRoKFLkesE85MLEoeaCkSMbNQ==",
         "dependencies": {
-          "Whisper.net.Runtime.Cuda.Linux": "1.9.0",
-          "Whisper.net.Runtime.Cuda.Windows": "1.9.0"
+          "Whisper.net.Runtime.Cuda.Linux": "1.9.1",
+          "Whisper.net.Runtime.Cuda.Windows": "1.9.1"
         }
       },
       "Xabe.FFmpeg": {
@@ -102,8 +102,8 @@
       },
       "Microsoft.Extensions.AI.Abstractions": {
         "type": "Transitive",
-        "resolved": "10.0.0",
-        "contentHash": "PHeuDm2tC6wJPEQvleUr2kNQaIMNqSf3aEbzkIPlZyQ0+0SYI9SwXVLdGD1NPBI+xB+Vb2lxZKhrFlIf9kP9WA=="
+        "resolved": "10.2.0",
+        "contentHash": "ONGlIBht0ygEdKc0bCt9XWUiq19/460dAu7fCKzPM34OFJSMQIohEDTJwjCJ8vVp8znNakloc9xFF9+R/eDCYQ=="
       },
       "Microsoft.Extensions.DependencyInjection.Abstractions": {
         "type": "Transitive",
@@ -149,18 +149,18 @@
       },
       "Whisper.net.Runtime.Cuda.Linux": {
         "type": "Transitive",
-        "resolved": "1.9.0",
-        "contentHash": "DmyNPIH411iYdUlhqa+/FL0f0C8Gik8T13XxLcwXV6iiu2zBPHBr4P1ddmgB+peXA5MBorVeqrFv9sIXgSYRVw=="
+        "resolved": "1.9.1",
+        "contentHash": "c4s7nNpQ4h0GQFTxCD+YxVvdDgmufH6X4+u7E+r+UqH0zWpu21btIkxdxNlORS5GoNffvF2G5GTh2MPPgf0vyQ=="
       },
       "Whisper.net.Runtime.Cuda.Windows": {
         "type": "Transitive",
-        "resolved": "1.9.0",
-        "contentHash": "0X+a5+6cg56uzgSl7meDyN5SWhqnDfBH9Gviyy9Tz+a2gfxtJpEYsXnIEK8RtsfYBEaubsKW8cTd67gn+x7AtQ=="
+        "resolved": "1.9.1",
+        "contentHash": "XtlH3orbEqSyXO6lLA66Y62xVlC9LS8DpsTA5SuYpR9ymdSZRFW+efuQmwGnNAUtEGeTIsPUZfNW896HgcsoFQ=="
       },
       "Whisper.net.Runtime.Metal": {
         "type": "Transitive",
-        "resolved": "1.9.0",
-        "contentHash": "HO66gX4D+vaElvmxnLaRGkyufuc8pGR6OlTwKinZAmUoN9KWG4AHA4AJHkj9ZQge95jNDZKKmQt6RE8RwAGJmA=="
+        "resolved": "1.9.1",
+        "contentHash": "Ut5tZyCUwXMVdThoLvdvQ7GyLwjRMreR/p3LuMJvRiXidQ2AXxx2Tv8UOGtMxvL395AC3+IkHdN/kMfd+EPSEw=="
       }
     },
     "net10.0/linux-x64": {},
