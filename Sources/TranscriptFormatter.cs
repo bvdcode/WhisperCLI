@@ -43,6 +43,11 @@ namespace WhisperCLI
             };
         }
 
+        public static string GetOutputPath(FileInfo inputFile, OutputFormat format)
+        {
+            return Path.ChangeExtension(inputFile.FullName, GetFileExtension(format));
+        }
+
         public static string GetFileExtension(OutputFormat format)
         {
             return format switch

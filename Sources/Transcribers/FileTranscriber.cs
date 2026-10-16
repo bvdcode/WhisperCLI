@@ -72,7 +72,7 @@ namespace WhisperCLI.Transcribers
                 }
             }
             _logger.Information("Elapsed: {el}", sw.Elapsed.ToString(@"hh\:mm\:ss"));
-            string outputFilePath = Path.ChangeExtension(inputFile.FullName, TranscriptFormatter.GetFileExtension(format));
+            string outputFilePath = TranscriptFormatter.GetOutputPath(inputFile, format);
             await File.WriteAllTextAsync(outputFilePath, TranscriptFormatter.Format(segments, format), Encoding.UTF8, token);
             _logger.Information("Transcription complete. Output saved to: {outputFilePath}", outputFilePath);
             return new FileInfo(outputFilePath);

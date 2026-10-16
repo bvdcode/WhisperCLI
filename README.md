@@ -138,6 +138,7 @@ Versions through 1.0.2 require a manual download to adopt the current release ex
 1. Pass `--folder <path>` to process every FFmpeg-detectable media file in that folder
 2. Add `-r` or `--recursive` to include subfolders
 3. Each output file is saved next to its source media file
+4. Folder runs skip media files whose output already exists in the selected format, before probing or transcription. Pass a single media file explicitly to regenerate its transcript
 
 ### For Microphone Input
 

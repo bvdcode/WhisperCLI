@@ -13,55 +13,6 @@ namespace WhisperCLI
 {
     public class Program
     {
-        private static readonly HashSet<string> MediaExtensions = new(StringComparer.OrdinalIgnoreCase)
-        {
-            ".3g2",
-            ".3gp",
-            ".aac",
-            ".ac3",
-            ".aif",
-            ".aiff",
-            ".amr",
-            ".ape",
-            ".asf",
-            ".au",
-            ".avi",
-            ".caf",
-            ".dts",
-            ".dv",
-            ".f4v",
-            ".flac",
-            ".flv",
-            ".m2ts",
-            ".m4a",
-            ".m4b",
-            ".m4v",
-            ".mka",
-            ".mkv",
-            ".mov",
-            ".mp2",
-            ".mp3",
-            ".mp4",
-            ".mpa",
-            ".mpeg",
-            ".mpg",
-            ".mts",
-            ".oga",
-            ".ogg",
-            ".ogm",
-            ".ogv",
-            ".opus",
-            ".ra",
-            ".rm",
-            ".rmvb",
-            ".ts",
-            ".vob",
-            ".wav",
-            ".webm",
-            ".wma",
-            ".wmv"
-        };
-
         public static async Task Main(string[] args)
         {
             CommandLine.ParserResult<AppOptions> parserResult = CommandLine.Parser.Default.ParseArguments<AppOptions>(args);
@@ -122,10 +73,10 @@ namespace WhisperCLI
                 }
 
                 logger.Information("Scanning folder: {folderPath}", folder.FullName);
-                inputFiles = await GetMediaFilesAsync(folder, options.Recursive, logger, cts.Token);
+                inputFiles = await GetMediaFilesAsync(folder, options.Recursive, options.Format, logger, cts.Token);
                 if (inputFiles.Count == 0)
                 {
-                    logger.Warning("No media files found in folder: {folderPath}", folder.FullName);
+                    logger.Warning("No media files require transcription in folder: {folderPath}", folder.FullName);
                     await DelayBeforeExitAsync(options, cts.Token);
                     return;
                 }
@@ -137,11 +88,12 @@ namespace WhisperCLI
                 DirectoryInfo inputDirectory = new(options.InputFilePath);
                 if (inputDirectory.Exists)
                 {
+                    folderMode = true;
                     logger.Information("Scanning folder: {folderPath}", inputDirectory.FullName);
-                    inputFiles = await GetMediaFilesAsync(inputDirectory, options.Recursive, logger, cts.Token);
+                    inputFiles = await GetMediaFilesAsync(inputDirectory, options.Recursive, options.Format, logger, cts.Token);
                     if (inputFiles.Count == 0)
                     {
-                        logger.Warning("No media files found in folder: {folderPath}", inputDirectory.FullName);
+                        logger.Warning("No media files require transcription in folder: {folderPath}", inputDirectory.FullName);
                         await DelayBeforeExitAsync(options, cts.Token);
                         return;
                     }
@@ -176,7 +128,7 @@ namespace WhisperCLI
                 }
                 else
                 {
-                    results.AddRange(await TranscribeFilesAsync(inputFiles, processorTask, options.Format, logger, cts.Token));
+                    results.AddRange(await TranscribeFilesAsync(inputFiles, processorTask, options.Format, folderMode, logger, cts.Token));
                 }
                 if (results.Count == 1 && options.OpenTextFile)
                 {
@@ -226,18 +178,12 @@ namespace WhisperCLI
             }
         }
 
-        private static async Task<List<FileInfo>> GetMediaFilesAsync(DirectoryInfo folder, bool recursive, Logger logger, CancellationToken token)
+        private static async Task<List<FileInfo>> GetMediaFilesAsync(DirectoryInfo folder, bool recursive, OutputFormat format, Logger logger, CancellationToken token)
         {
-            await CheckFfmpegAsync(logger, token);
-            SearchOption searchOption = recursive ? SearchOption.AllDirectories : SearchOption.TopDirectoryOnly;
             List<FileInfo> mediaFiles = [];
-            foreach (FileInfo file in folder.EnumerateFiles("*", searchOption).OrderBy(file => file.FullName, StringComparer.OrdinalIgnoreCase))
+            foreach (FileInfo file in MediaFileScanner.EnumeratePending(folder, recursive, format, logger, token))
             {
-                if (!MediaExtensions.Contains(file.Extension))
-                {
-                    continue;
-                }
-
+                await CheckFfmpegAsync(logger, token);
                 try
                 {
                     IMediaInfo mediaInfo = await FFmpeg.GetMediaInfo(file.FullName, token);
@@ -264,6 +210,7 @@ namespace WhisperCLI
             IReadOnlyList<FileInfo> inputFiles,
             Task<WhisperProcessor> processorTask,
             OutputFormat format,
+            bool skipExisting,
             Logger logger,
             CancellationToken token)
         {
@@ -273,6 +220,13 @@ namespace WhisperCLI
             for (int i = 0; i < inputFiles.Count; i++)
             {
                 FileInfo inputFile = inputFiles[i];
+                string outputPath = TranscriptFormatter.GetOutputPath(inputFile, format);
+                if (skipExisting && File.Exists(outputPath))
+                {
+                    logger.Information("Skipping {inputFile}: transcript already exists at {outputPath}.", inputFile.FullName, outputPath);
+                    continue;
+                }
+
                 logger.Information("Processing file {current}/{total}: {inputFile}", i + 1, inputFiles.Count, inputFile.FullName);
                 FileInfo result = await transcriber.TranscribeAudioAsync(inputFile, processor, format, token).ConfigureAwait(false);
                 results.Add(result);
