@@ -25,6 +25,9 @@ jobs:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
+      - name: Test release notes generation
+        shell: pwsh
+        run: ./.github/scripts/test-release-notes.ps1
       - uses: actions/setup-dotnet@v5
         with:
           global-json-file: global.json
@@ -73,6 +76,9 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
       - uses: actions/download-artifact@v5
         with:
           pattern: WhisperCLI-*
@@ -93,6 +99,17 @@ jobs:
             $hash = (Get-FileHash "artifacts/release/$name" -Algorithm SHA256).Hash.ToLowerInvariant()
             if ($checksums -cnotcontains "$hash  $name") { throw "Checksum mismatch for $name." }
           }
+      - name: Generate release notes from commits
+        shell: pwsh
+        env:
+          RELEASE_TAG: v${{ needs.version.outputs.SemVer }}
+          RELEASE_COMMIT: ${{ github.sha }}
+        run: |
+          ./.github/scripts/generate-release-notes.ps1 `
+            -Tag $env:RELEASE_TAG `
+            -Commit $env:RELEASE_COMMIT `
+            -Repository $env:GITHUB_REPOSITORY `
+            -ServerUrl $env:GITHUB_SERVER_URL
       - name: Publish GitHub Release
         uses: ncipollo/release-action@v1
         with:
@@ -101,6 +118,6 @@ jobs:
           name: WhisperCLI ${{ needs.version.outputs.SemVer }}
           artifacts: artifacts/release/*
           artifactErrorsFailBuild: true
-          generateReleaseNotes: true
+          bodyFile: artifacts/release-notes.md
           allowUpdates: true
           makeLatest: true

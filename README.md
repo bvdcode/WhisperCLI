@@ -180,6 +180,8 @@ Pushes to `main` run dependency auditing, Release builds, transcript and updater
 
 GitVersion 6.7.0 calculates the build version. The release policy starts at `1.0.0` and increments the patch version after the latest stable release tag. Rebuilding an already tagged commit uses its existing version. The same version is embedded in the executable and reported by `--version`.
 
+Release descriptions are generated from commit subjects since the highest earlier stable version tag reachable from the released commit, including direct commits to `main`. Each entry links to its commit, followed by a comparison link between versions. The first release includes the full commit history; rerunning a release regenerates the same range without treating its own tag as the previous version.
+
 ## License
 
 This project is licensed under the [MIT License](LICENSE).
