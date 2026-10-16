@@ -83,7 +83,7 @@ namespace WhisperCLI.Tests
 
         private async Task<string> CreateAsync(string relativePath)
         {
-            string path = Path.Combine(_directory.FullName, relativePath);
+            string path = Path.GetFullPath(Path.Combine(_directory.FullName, relativePath));
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
             await File.WriteAllTextAsync(path, string.Empty);
             return path;
