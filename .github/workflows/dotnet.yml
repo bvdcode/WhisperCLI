@@ -11,49 +11,94 @@ concurrency:
   group: whispercli-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
-  windows:
-    runs-on: windows-latest
-    timeout-minutes: 30
-    permissions:
-      contents: write
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      SemVer: ${{ steps.version.outputs.SemVer }}
+      AssemblyVersion: ${{ steps.version.outputs.AssemblyVersion }}
+      FileVersion: ${{ steps.version.outputs.FileVersion }}
     steps:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
-
       - uses: actions/setup-dotnet@v5
         with:
           global-json-file: global.json
-
       - name: Determine version
         id: version
         shell: pwsh
         run: ./.github/scripts/determine-version.ps1
 
-      - name: Validate and package Windows executable
+  build:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            runtime: win-x64
+          - os: ubuntu-latest
+            runtime: linux-x64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+      - name: Validate and package executable
         shell: pwsh
         run: |
           ./.github/scripts/test-and-package.ps1 `
-            -Version '${{ steps.version.outputs.SemVer }}' `
-            -AssemblyVersion '${{ steps.version.outputs.AssemblyVersion }}' `
-            -FileVersion '${{ steps.version.outputs.FileVersion }}'
+            -RuntimeIdentifier '${{ matrix.runtime }}' `
+            -Version '${{ needs.version.outputs.SemVer }}' `
+            -AssemblyVersion '${{ needs.version.outputs.AssemblyVersion }}' `
+            -FileVersion '${{ needs.version.outputs.FileVersion }}'
         env:
           ContinuousIntegrationBuild: true
-
       - uses: actions/upload-artifact@v5
         with:
-          name: WhisperCLI-win-x64-${{ steps.version.outputs.SemVer }}
+          name: WhisperCLI-${{ matrix.runtime }}-${{ needs.version.outputs.SemVer }}
           path: artifacts/release/*
           if-no-files-found: error
 
+  release:
+    needs: [version, build]
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: WhisperCLI-*
+          path: artifacts/packages
+      - name: Assemble release
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path artifacts/release -Force | Out-Null
+          foreach ($name in @('WhisperCLI.exe', 'WhisperCLI-linux-x64')) {
+            $files = @(Get-ChildItem artifacts/packages -Recurse -File | Where-Object Name -CEQ $name)
+            if ($files.Count -ne 1) { throw "Expected exactly one $name." }
+            Copy-Item -LiteralPath $files[0].FullName -Destination artifacts/release
+          }
+          $checksums = @(Get-ChildItem artifacts/packages -Recurse -File -Filter SHA256SUMS | Get-Content)
+          if ($checksums.Count -ne 2) { throw 'Expected checksums for both platforms.' }
+          $checksums | Sort-Object | Set-Content artifacts/release/SHA256SUMS -Encoding utf8NoBOM
+          foreach ($name in @('WhisperCLI.exe', 'WhisperCLI-linux-x64')) {
+            $hash = (Get-FileHash "artifacts/release/$name" -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($checksums -cnotcontains "$hash  $name") { throw "Checksum mismatch for $name." }
+          }
       - name: Publish GitHub Release
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
         uses: ncipollo/release-action@v1
         with:
-          tag: v${{ steps.version.outputs.SemVer }}
+          tag: v${{ needs.version.outputs.SemVer }}
           commit: ${{ github.sha }}
-          name: WhisperCLI ${{ steps.version.outputs.SemVer }}
+          name: WhisperCLI ${{ needs.version.outputs.SemVer }}
           artifacts: artifacts/release/*
           artifactErrorsFailBuild: true
           generateReleaseNotes: true

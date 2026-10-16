@@ -10,6 +10,7 @@ using WhisperCLI.Updates;
 namespace WhisperCLI.Tests
 {
     [TestFixture]
+    [Platform("Win")]
     public class SelfUpdaterTests
     {
         private string _directory = string.Empty;
@@ -42,7 +43,7 @@ namespace WhisperCLI.Tests
             using ReleaseHttpHandler handler = new(ReleaseTestData.Metadata(_version.ToString(), 1, "sha256:" + new string('0', 64)), []);
             using HttpClient http = new(handler);
             using Logger logger = new LoggerConfiguration().CreateLogger();
-            SelfUpdater updater = new(new GitHubReleaseClient(http), new UpdateInstaller(logger), logger);
+            SelfUpdater updater = new(new GitHubReleaseClient(http, ReleasePlatform.WindowsX64), new UpdateInstaller(logger), logger);
 
             await updater.UpdateAsync(_executable, CancellationToken.None);
 
@@ -56,7 +57,7 @@ namespace WhisperCLI.Tests
         {
             using HttpClient http = new(new ReleaseHttpHandler(ReleaseTestData.Metadata(NextVersion(), 4, "sha256:" + new string('0', 64)), [1, 2, 3, 4]));
             using Logger logger = new LoggerConfiguration().CreateLogger();
-            SelfUpdater updater = new(new GitHubReleaseClient(http), new UpdateInstaller(logger), logger);
+            SelfUpdater updater = new(new GitHubReleaseClient(http, ReleasePlatform.WindowsX64), new UpdateInstaller(logger), logger);
 
             Assert.ThrowsAsync<InvalidDataException>(() => updater.UpdateAsync(_executable, CancellationToken.None));
 
@@ -70,7 +71,7 @@ namespace WhisperCLI.Tests
             string digest = "sha256:" + Convert.ToHexString(SHA256.HashData(_original));
             using HttpClient http = new(new ReleaseHttpHandler(ReleaseTestData.Metadata(NextVersion(), _original.Length, digest), _original));
             using Logger logger = new LoggerConfiguration().CreateLogger();
-            SelfUpdater updater = new(new GitHubReleaseClient(http), new UpdateInstaller(logger), logger);
+            SelfUpdater updater = new(new GitHubReleaseClient(http, ReleasePlatform.WindowsX64), new UpdateInstaller(logger), logger);
 
             Assert.ThrowsAsync<InvalidDataException>(() => updater.UpdateAsync(_executable, CancellationToken.None));
 
@@ -95,7 +96,7 @@ namespace WhisperCLI.Tests
             using ReleaseHttpHandler handler = new(ReleaseTestData.Metadata(NextVersion(), 4, "sha256:" + new string('0', 64)), []);
             using HttpClient http = new(handler);
             using Logger logger = new LoggerConfiguration().CreateLogger();
-            SelfUpdater updater = new(new GitHubReleaseClient(http), new UpdateInstaller(logger), logger);
+            SelfUpdater updater = new(new GitHubReleaseClient(http, ReleasePlatform.WindowsX64), new UpdateInstaller(logger), logger);
             DirectoryInfo directory = new(_directory);
             DirectorySecurity originalPermissions = directory.GetAccessControl();
             DirectorySecurity restrictedPermissions = directory.GetAccessControl();

@@ -41,3 +41,33 @@ if ($transcriptionExitCode -ne 0 -or -not (Test-Path -LiteralPath $subtitleFile)
     throw "The standalone executable failed to load its native runtime and transcribe audio."
 }
 Write-Host "Standalone native runtime and file transcription passed."
+
+$nestedDirectory = Join-Path $OutputDirectory 'nested'
+New-Item -ItemType Directory -Path $nestedDirectory -Force | Out-Null
+[System.IO.File]::WriteAllBytes((Join-Path $nestedDirectory 'complete.mp3'), [byte[]]::new(0))
+$completedOutput = Join-Path $nestedDirectory 'complete.srt'
+[System.IO.File]::WriteAllText($completedOutput, 'Existing transcript')
+foreach ($arguments in @(@('--folder', $OutputDirectory), @($OutputDirectory))) {
+    $scanOutput = (& $Executable @arguments -r -m TinyEn -d 0 2>&1) -join [Environment]::NewLine
+    if ($LASTEXITCODE -ne 0 -or -not $scanOutput.Contains('transcript already exists', [StringComparison]::Ordinal) -or
+        $scanOutput.Contains('Checking FFmpeg', [StringComparison]::Ordinal) -or
+        $scanOutput.Contains('Creating WhisperProcessor', [StringComparison]::Ordinal) -or
+        [System.IO.File]::ReadAllText($completedOutput) -cne 'Existing transcript') {
+        Write-Host $scanOutput
+        throw 'A folder with completed transcripts must finish without probing or loading the model.'
+    }
+}
+Write-Host 'Completed recursive folder inputs were skipped before probing and model loading.'
+
+$queueDirectory = Join-Path $OutputDirectory 'queue'
+New-Item -ItemType Directory -Path $queueDirectory -Force | Out-Null
+[System.IO.File]::Delete((Join-Path $queueDirectory 'recording.srt'))
+Copy-Item -LiteralPath $inputFile -Destination (Join-Path $queueDirectory 'recording.wav') -Force
+Copy-Item -LiteralPath $inputFile -Destination (Join-Path $queueDirectory 'recording.mp3') -Force
+$queueOutput = (& $Executable --folder $queueDirectory -r -m TinyEn -l en -d 0 2>&1) -join [Environment]::NewLine
+if ($LASTEXITCODE -ne 0 -or ([regex]::Matches($queueOutput, 'Starting transcription for')).Count -ne 1 -or
+    -not $queueOutput.Contains('transcript already exists', [StringComparison]::Ordinal)) {
+    Write-Host $queueOutput
+    throw 'An output created earlier in the queue must not be transcribed again.'
+}
+Write-Host 'Folder processing rechecked existing transcripts before each queued file.'

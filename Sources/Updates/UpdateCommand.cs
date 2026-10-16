@@ -6,12 +6,6 @@ namespace WhisperCLI.Updates
     {
         public static async Task<int> RunAsync(AppOptions options, ILogger logger, CancellationToken token)
         {
-            if (!OperatingSystem.IsWindows())
-            {
-                logger.Error("Self-update is supported only for the Windows executable.");
-                return 1;
-            }
-
             if (!string.IsNullOrWhiteSpace(options.InputFilePath) || !string.IsNullOrWhiteSpace(options.FolderPath))
             {
                 logger.Error("Use --update without an input file or --folder.");
@@ -19,7 +13,8 @@ namespace WhisperCLI.Updates
             }
 
             string? executablePath = Environment.ProcessPath;
-            if (executablePath is null || !Path.GetExtension(executablePath).Equals(".exe", StringComparison.OrdinalIgnoreCase) ||
+            if (executablePath is null ||
+                (OperatingSystem.IsWindows() && !Path.GetExtension(executablePath).Equals(".exe", StringComparison.OrdinalIgnoreCase)) ||
                 Path.GetFileNameWithoutExtension(executablePath).Equals("dotnet", StringComparison.OrdinalIgnoreCase))
             {
                 logger.Error("Run --update from the WhisperCLI executable, rather than dotnet.");
@@ -33,7 +28,7 @@ namespace WhisperCLI.Updates
             timeout.CancelAfter(TimeSpan.FromMinutes(15));
             try
             {
-                SelfUpdater updater = new(new GitHubReleaseClient(httpClient), new UpdateInstaller(logger), logger);
+                SelfUpdater updater = new(new GitHubReleaseClient(httpClient, ReleaseAssets.CurrentPlatform), new UpdateInstaller(logger), logger);
                 await updater.UpdateAsync(executablePath, timeout.Token).ConfigureAwait(false);
                 return 0;
             }

@@ -6,8 +6,18 @@ namespace WhisperCLI.Updates
 {
     internal class UpdateInstaller(ILogger logger)
     {
-        public async Task ScheduleAsync(string executablePath, string stagedPath, GitHubRelease release, CancellationToken token)
+        public async Task InstallAsync(string executablePath, string stagedPath, GitHubRelease release, CancellationToken token)
         {
+            token.ThrowIfCancellationRequested();
+            if (OperatingSystem.IsLinux())
+            {
+                File.Move(stagedPath, executablePath, overwrite: true);
+                return;
+            }
+            if (!OperatingSystem.IsWindows())
+            {
+                throw new PlatformNotSupportedException("Executable replacement is supported on Windows and Linux.");
+            }
             string scriptPath = Path.ChangeExtension(stagedPath, ".ps1");
             bool started = false;
             try

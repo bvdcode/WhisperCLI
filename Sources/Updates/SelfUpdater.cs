@@ -1,15 +1,12 @@
-using System.Diagnostics;
 using Serilog;
 
 namespace WhisperCLI.Updates
 {
     internal class SelfUpdater(GitHubReleaseClient releases, UpdateInstaller installer, ILogger logger)
     {
-        private const string ProductName = "WhisperCLI";
-
         public async Task UpdateAsync(string executablePath, CancellationToken token)
         {
-            Version currentVersion = GetVersion(executablePath);
+            Version currentVersion = await ExecutableVersion.ReadAsync(executablePath, token).ConfigureAwait(false);
             logger.Information("Checking the latest GitHub Release. Current version: {version}", currentVersion);
             GitHubRelease release = await releases.GetLatestAsync(token).ConfigureAwait(false);
             if (release.Version <= currentVersion)
@@ -19,40 +16,39 @@ namespace WhisperCLI.Updates
             }
 
             string directory = Path.GetDirectoryName(executablePath) ?? throw new InvalidOperationException("The executable directory is not available.");
-            string stagedPath = Path.Combine(directory, $".{Path.GetFileName(executablePath)}.{Guid.NewGuid():N}.update.exe");
-            bool scheduled = false;
+            string stagedPath = Path.Combine(directory, $".{Path.GetFileName(executablePath)}.{Guid.NewGuid():N}.update{Path.GetExtension(executablePath)}");
+            bool installationStarted = false;
             try
             {
                 logger.Information("Downloading WhisperCLI {version} ({size:0.0} MB)...", release.Version, release.Size / 1048576.0);
                 await releases.DownloadAsync(release, stagedPath, token).ConfigureAwait(false);
-                FileVersionInfo metadata = FileVersionInfo.GetVersionInfo(stagedPath);
-                if (metadata.ProductName != ProductName || GetVersion(stagedPath) != release.Version)
+                if (OperatingSystem.IsLinux())
+                {
+                    File.SetUnixFileMode(stagedPath, File.GetUnixFileMode(executablePath));
+                }
+                if (await ExecutableVersion.ReadAsync(stagedPath, token).ConfigureAwait(false) != release.Version)
                 {
                     throw new InvalidDataException("The downloaded executable does not match the release product and version.");
                 }
 
-                await installer.ScheduleAsync(executablePath, stagedPath, release, token).ConfigureAwait(false);
-                scheduled = true;
-                logger.Information("Download verified. Version {version} will replace this executable after exit. Update log: {path}", release.Version, executablePath + ".update.log");
+                await installer.InstallAsync(executablePath, stagedPath, release, token).ConfigureAwait(false);
+                installationStarted = true;
+                if (OperatingSystem.IsWindows())
+                {
+                    logger.Information("Download verified. Version {version} will replace this executable after exit. Update log: {path}", release.Version, executablePath + ".update.log");
+                }
+                else
+                {
+                    logger.Information("Updated successfully to {version}.", release.Version);
+                }
             }
             finally
             {
-                if (!scheduled)
+                if (!installationStarted)
                 {
                     File.Delete(stagedPath);
                 }
             }
-        }
-
-        private static Version GetVersion(string path)
-        {
-            string? productVersion = FileVersionInfo.GetVersionInfo(path).ProductVersion;
-            if (productVersion is null || !Version.TryParse(productVersion.Split('+', '-')[0], out Version? version) || version.Build < 0)
-            {
-                throw new InvalidDataException("The executable does not contain a valid product version.");
-            }
-
-            return new Version(version.Major, version.Minor, version.Build);
         }
     }
 }

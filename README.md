@@ -11,7 +11,7 @@ WhisperCLI is a command-line tool for transcribing audio from files or microphon
 - Automatic downloading of Whisper models
 - Automatic downloading of FFmpeg
 - Support for different Whisper model sizes (default: LargeV3Turbo)
-- Standalone Windows x64 executable, with optional CUDA acceleration
+- Standalone Windows x64 and Linux x64 executables, with optional CUDA acceleration
 - Progress reporting during conversion and transcription
 - Exclude standalone phrases from the built-in dictionary in file and microphone transcripts
 
@@ -19,14 +19,15 @@ The exclusion dictionary currently contains `Продолжение следуе
 
 ## Requirements
 
-- Windows x64 for the published executable; no separate .NET installation is required
+- Windows x64 or Linux x64 with glibc for the published executables; no separate .NET installation is required
+- Microphone recording requires Windows; file and folder transcription work on both platforms
 - .NET SDK 10.0.301 for building from source
 
 ## Installation
 
 ### Using Published Release
 
-Download `WhisperCLI.exe` from the [latest release](https://github.com/bvdcode/WhisperCLI/releases/latest) and run it from your preferred location. The executable includes the .NET runtime and Whisper native libraries, which are extracted to the system temporary directory on first launch. Models and FFmpeg are downloaded as needed.
+Download `WhisperCLI.exe` for Windows or `WhisperCLI-linux-x64` for Linux from the [latest release](https://github.com/bvdcode/WhisperCLI/releases/latest). On Linux, run `chmod +x WhisperCLI-linux-x64` before launching it. Each executable includes the .NET runtime and Whisper native libraries, which are extracted to the system temporary directory on first launch. Models and FFmpeg are downloaded as needed.
 
 `SHA256SUMS` is included in each release to verify the executable's checksum.
 
@@ -40,7 +41,9 @@ Download `WhisperCLI.exe` from the [latest release](https://github.com/bvdcode/W
    ```
 4. Publish the project (optional):
    ```
-   dotnet publish Sources/WhisperCLI.csproj -p:PublishProfile=FolderProfile
+   dotnet publish Sources/WhisperCLI.csproj -p:PublishProfile=FolderProfile -r win-x64
+   # Or publish for Linux:
+   dotnet publish Sources/WhisperCLI.csproj -p:PublishProfile=FolderProfile -r linux-x64
    ```
 
 ## Usage
@@ -60,7 +63,7 @@ WhisperCLI [options] [inputFilePath]
 - `-f, --format`: Output format for file/folder transcription: `srt`, `vtt`, or `txt` (default: `srt`; microphone always writes `txt`)
 - `--folder`: Process all media files in the specified folder
 - `-r, --recursive`: Include subfolders when using `--folder`
-- `--update`: Download the latest stable GitHub Release and replace the running Windows executable after exit
+- `--update`: Download the latest stable GitHub Release and update the executable for the current operating system and architecture
 - `inputFilePath`: Path to the audio/video file or folder to transcribe (if omitted without `--folder`, uses microphone input)
 
 ### Examples
@@ -115,11 +118,13 @@ Run the installed executable with `--update`:
 
 ```
 WhisperCLI.exe --update
+# Linux
+./WhisperCLI-linux-x64 --update
 ```
 
-The updater compares the installed version with the latest stable GitHub Release. If a newer version is available, it checks the download size, GitHub's SHA-256 digest, product name, and version before replacing the executable. The original filename and installation directory are preserved. Models, recordings, and transcripts are retained.
+The updater compares the installed version with the latest stable GitHub Release. If a newer version is available, it checks the download size, GitHub's SHA-256 digest, product name, and version before replacing the executable. The updater selects `WhisperCLI.exe` on Windows x64 and `WhisperCLI-linux-x64` on Linux x64. A missing platform asset is an error; it never downloads the other operating system's executable. The original filename and installation directory are preserved. Models, recordings, and transcripts are retained.
 
-The installation folder must be writable. On Windows, a hidden PowerShell helper applies the update after the application exits. Its result is recorded beside the executable in `<executable>.update.log`. Network or checksum failures do not change the installed executable. Use `--update` without a media file or `--folder`.
+The installation folder must be writable. On Windows, a hidden PowerShell helper applies the update after the application exits. Its result is recorded beside the executable in `<executable>.update.log`. On Linux, the verified executable atomically replaces the installed file while preserving its execute permissions. Completion is reported in the terminal. Network or checksum failures do not change the installed executable. Use `--update` without a media file or `--folder`.
 
 Versions through 1.0.2 require a manual download to adopt the current release executable name.
 
@@ -159,7 +164,7 @@ Versions through 1.0.2 require a manual download to adopt the current release ex
 
 ## Builds and Releases
 
-Pushes to `main` run dependency auditing, a Release build, subtitle tests, and a transcription check using the standalone executable. A successful build publishes the executable and its SHA-256 checksum to GitHub Releases. Pull requests run the same validation without publishing a release.
+Pushes to `main` run dependency auditing, Release builds, transcript and updater tests, and standalone transcription checks on Windows and Linux. Only after both platform jobs pass does one GitHub Release publish `WhisperCLI.exe`, `WhisperCLI-linux-x64`, and a combined `SHA256SUMS`. Folder checks verify that completed transcripts are skipped before probing or loading a model. Pull requests run the same validation without publishing a release.
 
 GitVersion 6.7.0 calculates the build version. The release policy starts at `1.0.0` and increments the patch version after the latest stable release tag. Rebuilding an already tagged commit uses its existing version. The same version is embedded in the executable and reported by `--version`.
 

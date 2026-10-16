@@ -1,4 +1,5 @@
 param(
+    [Parameter(Mandatory = $true)][ValidateSet('win-x64', 'linux-x64')][string]$RuntimeIdentifier,
     [Parameter(Mandatory = $true)][string]$Version,
     [Parameter(Mandatory = $true)][string]$AssemblyVersion,
     [Parameter(Mandatory = $true)][string]$FileVersion
@@ -6,9 +7,13 @@ param(
 
 $ErrorActionPreference = "Stop"
 $repositoryRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "../.."))
-$publishDirectory = Join-Path $repositoryRoot "artifacts/publish/win-x64"
+$publishDirectory = Join-Path $repositoryRoot "artifacts/publish/$RuntimeIdentifier"
 $releaseDirectory = Join-Path $repositoryRoot "artifacts/release"
-$executableName = "WhisperCLI.exe"
+switch ($RuntimeIdentifier) {
+    'win-x64' { $publishedName = 'WhisperCLI.exe'; $executableName = 'WhisperCLI.exe' }
+    'linux-x64' { $publishedName = 'WhisperCLI'; $executableName = 'WhisperCLI-linux-x64' }
+    default { throw "Unsupported runtime: $RuntimeIdentifier." }
+}
 $versionProperties = @(
     "-p:Version=$Version",
     "-p:AssemblyVersion=$AssemblyVersion",
@@ -28,16 +33,18 @@ try {
     dotnet test Sources/WhisperCLI.sln -c Release --no-build --no-restore --verbosity normal
     if ($LASTEXITCODE -ne 0) { throw "Tests failed." }
 
-    dotnet publish Sources/WhisperCLI.csproj --no-restore -p:PublishProfile=FolderProfile -o $publishDirectory @versionProperties
-    if ($LASTEXITCODE -ne 0) { throw "Windows publication failed." }
+    dotnet publish Sources/WhisperCLI.csproj --no-restore -r $RuntimeIdentifier -p:PublishProfile=FolderProfile -o $publishDirectory @versionProperties
+    if ($LASTEXITCODE -ne 0) { throw "Publication failed for $RuntimeIdentifier." }
 
     New-Item -ItemType Directory -Path $releaseDirectory -Force | Out-Null
     $executable = Join-Path $releaseDirectory $executableName
-    Copy-Item -LiteralPath (Join-Path $publishDirectory $executableName) -Destination $executable -Force
+    Copy-Item -LiteralPath (Join-Path $publishDirectory $publishedName) -Destination $executable -Force
 
-    $metadata = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($executable)
-    if ($metadata.ProductVersion -ne $Version -or $metadata.FileVersion -ne $FileVersion) {
-        throw "Executable version metadata does not match the release version."
+    if ($RuntimeIdentifier -eq 'win-x64') {
+        $metadata = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($executable)
+        if ($metadata.ProductVersion -ne $Version -or $metadata.FileVersion -ne $FileVersion) {
+            throw "Executable version metadata does not match the release version."
+        }
     }
 
     $versionOutput = (& $executable --version 2>&1) -join [Environment]::NewLine

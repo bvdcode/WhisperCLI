@@ -114,6 +114,14 @@ namespace WhisperCLI
                 }
             }
 
+            if (inputFiles.Count == 0 && !OperatingSystem.IsWindows())
+            {
+                logger.Error("Microphone recording requires Windows. Specify a media file or --folder.");
+                Environment.ExitCode = 1;
+                await DelayBeforeExitAsync(options, cts.Token);
+                return;
+            }
+
             FileInfo whisperModelInfo = await GetWhisperModelPathAsync(options.Model, logger, cts.Token);
             Task<WhisperProcessor> processorTask = CreateProcessorAsync(options.Model, whisperModelInfo, logger, options.Language, cts.Token);
             List<FileInfo> results = [];

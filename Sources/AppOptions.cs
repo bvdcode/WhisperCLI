@@ -46,7 +46,7 @@ namespace WhisperCLI
         [Option("folder", Required = false, HelpText = "Process all media files in the specified folder. Use '.' for the current folder.")]
         public string FolderPath { get; set; } = string.Empty;
 
-        [Option('r', "recursive", Required = false, Default = false, HelpText = "When using --folder, include subfolders.")]
+        [Option('r', "recursive", Required = false, Default = false, HelpText = "When using folder input, include subfolders.")]
         public bool Recursive { get; set; }
 
         [Option("update", Required = false, Default = false, HelpText = "Download the latest stable GitHub Release and update this executable.")]

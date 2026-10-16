@@ -3,9 +3,8 @@ using System.Text.Json;
 
 namespace WhisperCLI.Updates
 {
-    internal class GitHubReleaseClient(HttpClient httpClient)
+    internal class GitHubReleaseClient(HttpClient httpClient, ReleasePlatform platform)
     {
-        public const string AssetName = "WhisperCLI.exe";
         private const string Repository = "bvdcode/WhisperCLI";
         private const string Sha256Prefix = "sha256:";
         private static readonly Uri LatestReleaseUrl = new($"https://api.github.com/repos/{Repository}/releases/latest");
@@ -28,14 +27,15 @@ namespace WhisperCLI.Updates
                 throw new InvalidDataException("The release tag is not a supported stable version.");
             }
 
+            string assetName = ReleaseAssets.GetName(platform);
             JsonElement asset = release.GetProperty("assets").EnumerateArray()
-                .FirstOrDefault(candidate => candidate.GetProperty("name").GetString() == AssetName);
+                .FirstOrDefault(candidate => candidate.GetProperty("name").GetString() == assetName);
             if (asset.ValueKind == JsonValueKind.Undefined || asset.GetProperty("state").GetString() != "uploaded")
             {
-                throw new InvalidDataException($"The latest release does not contain {AssetName}.");
+                throw new InvalidDataException($"The latest release does not contain {assetName}.");
             }
 
-            string expectedUrl = $"https://github.com/{Repository}/releases/download/{tag}/{AssetName}";
+            string expectedUrl = $"https://github.com/{Repository}/releases/download/{tag}/{assetName}";
             if (asset.GetProperty("browser_download_url").GetString() != expectedUrl)
             {
                 throw new InvalidDataException("The executable download URL does not belong to this release.");
