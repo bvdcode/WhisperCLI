@@ -9,7 +9,8 @@ namespace WhisperCLI
             "Продолжение следует",
             "Субтитры создавал DimaTorzok",
             "Субтитры сделал DimaTorzok",
-            "Субтитры делал DimaTorzok"
+            "Субтитры делал DimaTorzok",
+            "Редактор субтитров А Семкин Корректор А Егорова"
         };
 
         public static bool IsExcluded(string text)
