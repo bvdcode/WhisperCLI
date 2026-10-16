@@ -6,7 +6,10 @@ namespace WhisperCLI
     {
         private static readonly HashSet<string> ExcludedPhrases = new(StringComparer.OrdinalIgnoreCase)
         {
-            "Продолжение следует"
+            "Продолжение следует",
+            "Субтитры создавал DimaTorzok",
+            "Субтитры сделал DimaTorzok",
+            "Субтитры делал DimaTorzok"
         };
 
         public static bool IsExcluded(string text)
