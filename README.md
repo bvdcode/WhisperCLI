@@ -126,7 +126,7 @@ The updater compares the installed version with the latest stable GitHub Release
 
 The installation folder must be writable. On Windows, a hidden PowerShell helper applies the update after the application exits. Its result is recorded beside the executable in `<executable>.update.log`. On Linux, the verified executable atomically replaces the installed file while preserving its execute permissions. Completion is reported in the terminal. Network or checksum failures do not change the installed executable. Use `--update` without a media file or `--folder`.
 
-Versions through 1.0.2 require a manual download to adopt the current release executable name.
+Versions through 1.0.2 require a manual download to adopt the current release executable name. The Linux executable in 1.0.4 also requires a manual download to adopt the working Linux updater.
 
 ## How It Works
 

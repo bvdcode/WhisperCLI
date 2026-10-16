@@ -36,6 +36,17 @@ namespace WhisperCLI.Tests
         }
 
         [Test]
+        public async Task CurrentCliVersionIsReadFromTheParserOutput()
+        {
+            string executable = Path.Combine(TestContext.CurrentContext.TestDirectory, "WhisperCLI");
+            FileVersionInfo metadata = FileVersionInfo.GetVersionInfo(Path.Combine(TestContext.CurrentContext.TestDirectory, "WhisperCLI.dll"));
+
+            Version version = await ExecutableVersion.ReadAsync(executable, CancellationToken.None);
+
+            Assert.That(version, Is.EqualTo(new Version(metadata.ProductMajorPart, metadata.ProductMinorPart, metadata.ProductBuildPart)));
+        }
+
+        [Test]
         public async Task UpdateReplacesRunningRenamedExecutableAndPreservesPermissions()
         {
             ProcessStartInfo startInfo = new(_executable) { RedirectStandardInput = true, RedirectStandardOutput = true };
@@ -134,7 +145,7 @@ namespace WhisperCLI.Tests
 
         private static byte[] Executable(string heading)
         {
-            return Encoding.UTF8.GetBytes($"#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  printf '%s\\n' '{heading}'\nelse\n  printf 'ready\\n'\n  read -r input\nfi\n");
+            return Encoding.UTF8.GetBytes($"#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  printf '%s\\n' '{heading}' >&2\nelse\n  printf 'ready\\n'\n  read -r input\nfi\n");
         }
     }
 }

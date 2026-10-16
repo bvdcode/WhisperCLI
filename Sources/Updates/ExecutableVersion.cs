@@ -33,10 +33,12 @@ namespace WhisperCLI.Updates
             try
             {
                 await process.WaitForExitAsync(timeout.Token).ConfigureAwait(false);
-                string[] heading = (await output.ConfigureAwait(false)).Split('\n')[0].Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                string versionText = await error.ConfigureAwait(false);
+                await output.ConfigureAwait(false);
+                string[] heading = versionText.Split('\n')[0].Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
                 if (process.ExitCode != 0 || heading.Length != 2 || heading[0] != ProductName)
                 {
-                    throw new InvalidDataException($"The executable did not report a valid WhisperCLI version: {(await error.ConfigureAwait(false)).Trim()}");
+                    throw new InvalidDataException($"The executable did not report a valid WhisperCLI version: {versionText.Trim()}");
                 }
                 return Parse(heading[1]);
             }
