@@ -16,7 +16,7 @@ namespace WhisperCLI.Updates
             return platform switch
             {
                 ReleasePlatform.WindowsX64 => "WhisperCLI.exe",
-                ReleasePlatform.LinuxX64 => "WhisperCLI-linux-x64",
+                ReleasePlatform.LinuxX64 => "whispercli",
                 _ => throw new ArgumentOutOfRangeException(nameof(platform), platform, "Unsupported release platform.")
             };
         }

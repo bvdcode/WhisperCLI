@@ -81,7 +81,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path artifacts/release -Force | Out-Null
-          foreach ($name in @('WhisperCLI.exe', 'WhisperCLI-linux-x64')) {
+          foreach ($name in @('WhisperCLI.exe', 'whispercli')) {
             $files = @(Get-ChildItem artifacts/packages -Recurse -File | Where-Object Name -CEQ $name)
             if ($files.Count -ne 1) { throw "Expected exactly one $name." }
             Copy-Item -LiteralPath $files[0].FullName -Destination artifacts/release
@@ -89,7 +89,7 @@ jobs:
           $checksums = @(Get-ChildItem artifacts/packages -Recurse -File -Filter SHA256SUMS | Get-Content)
           if ($checksums.Count -ne 2) { throw 'Expected checksums for both platforms.' }
           $checksums | Sort-Object | Set-Content artifacts/release/SHA256SUMS -Encoding utf8NoBOM
-          foreach ($name in @('WhisperCLI.exe', 'WhisperCLI-linux-x64')) {
+          foreach ($name in @('WhisperCLI.exe', 'whispercli')) {
             $hash = (Get-FileHash "artifacts/release/$name" -Algorithm SHA256).Hash.ToLowerInvariant()
             if ($checksums -cnotcontains "$hash  $name") { throw "Checksum mismatch for $name." }
           }

@@ -76,7 +76,7 @@ namespace WhisperCLI.Tests
         }
 
         [TestCase("WindowsX64", "WhisperCLI.exe")]
-        [TestCase("LinuxX64", "WhisperCLI-linux-x64")]
+        [TestCase("LinuxX64", "whispercli")]
         public async Task MatchingPlatformAssetIsSelectedAndVerified(string platformName, string expectedName)
         {
             using ReleaseHttpHandler handler = new(ReleaseTestData.MultiplatformMetadata("1.2.3", Payload.Length, Digest), Payload);
@@ -102,7 +102,7 @@ namespace WhisperCLI.Tests
         [Test]
         public void LinuxAssetCannotBeSelectedForWindows()
         {
-            using HttpClient http = new(new ReleaseHttpHandler(ReleaseTestData.Metadata("1.2.3", 4, Digest, assetName: "WhisperCLI-linux-x64"), Payload));
+            using HttpClient http = new(new ReleaseHttpHandler(ReleaseTestData.Metadata("1.2.3", 4, Digest, assetName: "whispercli"), Payload));
             GitHubReleaseClient client = new(http, ReleasePlatform.WindowsX64);
 
             Assert.ThrowsAsync<InvalidDataException>(() => client.GetLatestAsync(CancellationToken.None));

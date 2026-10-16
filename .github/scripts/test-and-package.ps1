@@ -11,7 +11,7 @@ $publishDirectory = Join-Path $repositoryRoot "artifacts/publish/$RuntimeIdentif
 $releaseDirectory = Join-Path $repositoryRoot "artifacts/release"
 switch ($RuntimeIdentifier) {
     'win-x64' { $publishedName = 'WhisperCLI.exe'; $executableName = 'WhisperCLI.exe' }
-    'linux-x64' { $publishedName = 'WhisperCLI'; $executableName = 'WhisperCLI-linux-x64' }
+    'linux-x64' { $publishedName = 'WhisperCLI'; $executableName = 'whispercli' }
     default { throw "Unsupported runtime: $RuntimeIdentifier." }
 }
 $versionProperties = @(

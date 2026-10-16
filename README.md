@@ -27,7 +27,7 @@ The exclusion dictionary currently contains `Продолжение следуе
 
 ### Using Published Release
 
-Download `WhisperCLI.exe` for Windows or `WhisperCLI-linux-x64` for Linux from the [latest release](https://github.com/bvdcode/WhisperCLI/releases/latest). On Linux, run `chmod +x WhisperCLI-linux-x64` before launching it. Each executable includes the .NET runtime and Whisper native libraries, which are extracted to the system temporary directory on first launch. Models and FFmpeg are downloaded as needed.
+Download `WhisperCLI.exe` for Windows or `whispercli` for Linux from the [latest release](https://github.com/bvdcode/WhisperCLI/releases/latest). On Linux, run `chmod +x whispercli` before launching it. Each executable includes the .NET runtime and Whisper native libraries, which are extracted to the system temporary directory on first launch. Models and FFmpeg are downloaded as needed.
 
 `SHA256SUMS` is included in each release to verify the executable's checksum.
 
@@ -119,10 +119,10 @@ Run the installed executable with `--update`:
 ```
 WhisperCLI.exe --update
 # Linux
-./WhisperCLI-linux-x64 --update
+./whispercli --update
 ```
 
-The updater compares the installed version with the latest stable GitHub Release. If a newer version is available, it checks the download size, GitHub's SHA-256 digest, product name, and version before replacing the executable. The updater selects `WhisperCLI.exe` on Windows x64 and `WhisperCLI-linux-x64` on Linux x64. A missing platform asset is an error; it never downloads the other operating system's executable. The original filename and installation directory are preserved. Models, recordings, and transcripts are retained.
+The updater compares the installed version with the latest stable GitHub Release. If a newer version is available, it checks the download size, GitHub's SHA-256 digest, product name, and version before replacing the executable. The updater selects `WhisperCLI.exe` on Windows x64 and `whispercli` on Linux x64. A missing platform asset is an error; it never downloads the other operating system's executable. The original filename and installation directory are preserved. Models, recordings, and transcripts are retained.
 
 The installation folder must be writable. On Windows, a hidden PowerShell helper applies the update after the application exits. Its result is recorded beside the executable in `<executable>.update.log`. On Linux, the verified executable atomically replaces the installed file while preserving its execute permissions. Completion is reported in the terminal. Network or checksum failures do not change the installed executable. Use `--update` without a media file or `--folder`.
 
@@ -164,7 +164,7 @@ Versions through 1.0.2 require a manual download to adopt the current release ex
 
 ## Builds and Releases
 
-Pushes to `main` run dependency auditing, Release builds, transcript and updater tests, and standalone transcription checks on Windows and Linux. Only after both platform jobs pass does one GitHub Release publish `WhisperCLI.exe`, `WhisperCLI-linux-x64`, and a combined `SHA256SUMS`. Folder checks verify that completed transcripts are skipped before probing or loading a model. Pull requests run the same validation without publishing a release.
+Pushes to `main` run dependency auditing, Release builds, transcript and updater tests, and standalone transcription checks on Windows and Linux. Only after both platform jobs pass does one GitHub Release publish `WhisperCLI.exe`, `whispercli`, and a combined `SHA256SUMS`. Folder checks verify that completed transcripts are skipped before probing or loading a model. Pull requests run the same validation without publishing a release.
 
 GitVersion 6.7.0 calculates the build version. The release policy starts at `1.0.0` and increments the patch version after the latest stable release tag. Rebuilding an already tagged commit uses its existing version. The same version is embedded in the executable and reported by `--version`.
 
