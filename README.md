@@ -1,5 +1,7 @@
 # WhisperCLI
 
+[![CodeFactor](https://www.codefactor.io/repository/github/bvdcode/whispercli/badge)](https://www.codefactor.io/repository/github/bvdcode/whispercli)
+
 WhisperCLI is a command-line tool for transcribing audio from files or microphone input using OpenAI's Whisper speech recognition models via the Whisper.net library.
 
 ## Features

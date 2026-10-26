@@ -31,14 +31,14 @@ namespace WhisperCLI.Tests
         [Test]
         public void ShortReplyGetsAtLeastOneSecondOfAudio()
         {
-            var chunks = SpeechChunker.Create(10 * Rate, [new(2 * Rate, 2 * Rate + 3200)]);
+            var chunks = SpeechChunker.Create(10 * Rate, [new(2 * Rate, (2 * Rate) + 3200)]);
             Assert.That(chunks, Is.EqualTo(new AudioChunk[] { new(25600, 41600) }));
         }
 
         [Test]
         public void SpeechAtTheEndIsClampedAndRetained()
         {
-            var chunks = SpeechChunker.Create(10 * Rate, [new(10 * Rate - 1600, 11 * Rate)]);
+            var chunks = SpeechChunker.Create(10 * Rate, [new((10 * Rate) - 1600, 11 * Rate)]);
             Assert.That(chunks, Is.EqualTo(new AudioChunk[] { new(9 * Rate, 10 * Rate) }));
         }
 

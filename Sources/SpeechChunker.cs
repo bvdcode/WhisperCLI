@@ -21,7 +21,7 @@ namespace WhisperCLI
                 if (end - start < SampleRate)
                 {
                     int extra = SampleRate - (end - start);
-                    start = Math.Max(0, start - extra / 2);
+                    start = Math.Max(0, start - (extra / 2));
                     end = Math.Min(sampleCount, start + SampleRate);
                     start = Math.Max(0, end - SampleRate);
                 }
