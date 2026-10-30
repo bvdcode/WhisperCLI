@@ -1,28 +1,123 @@
-# This workflow will build a .NET project
-# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-net
-
-name: .NET
+name: Build and Release
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [main]
   pull_request:
-    branches: [ "main" ]
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: whispercli-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
-  build:
-
+  version:
     runs-on: ubuntu-latest
-
+    outputs:
+      SemVer: ${{ steps.version.outputs.SemVer }}
+      AssemblyVersion: ${{ steps.version.outputs.AssemblyVersion }}
+      FileVersion: ${{ steps.version.outputs.FileVersion }}
     steps:
-    - uses: actions/checkout@v4
-    - name: Setup .NET
-      uses: actions/setup-dotnet@v4
-      with:
-        dotnet-version: 9.0.x
-    - name: Restore dependencies
-      run: dotnet restore
-    - name: Build
-      run: dotnet build --no-restore
-    - name: Test
-      run: dotnet test --no-build --verbosity normal
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Test release notes generation
+        shell: pwsh
+        run: ./.github/scripts/test-release-notes.ps1
+      - uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+      - name: Determine version
+        id: version
+        shell: pwsh
+        run: ./.github/scripts/determine-version.ps1
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            runtime: win-x64
+          - os: ubuntu-latest
+            runtime: linux-x64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+      - name: Validate and package executable
+        shell: pwsh
+        run: |
+          ./.github/scripts/test-and-package.ps1 `
+            -RuntimeIdentifier '${{ matrix.runtime }}' `
+            -Version '${{ needs.version.outputs.SemVer }}' `
+            -AssemblyVersion '${{ needs.version.outputs.AssemblyVersion }}' `
+            -FileVersion '${{ needs.version.outputs.FileVersion }}'
+        env:
+          ContinuousIntegrationBuild: true
+      - uses: actions/upload-artifact@v5
+        with:
+          name: WhisperCLI-${{ matrix.runtime }}-${{ needs.version.outputs.SemVer }}
+          path: artifacts/release/*
+          if-no-files-found: error
+
+  release:
+    needs: [version, build]
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: WhisperCLI-*
+          path: artifacts/packages
+      - name: Assemble release
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path artifacts/release -Force | Out-Null
+          foreach ($name in @('WhisperCLI.exe', 'whispercli')) {
+            $files = @(Get-ChildItem artifacts/packages -Recurse -File | Where-Object Name -CEQ $name)
+            if ($files.Count -ne 1) { throw "Expected exactly one $name." }
+            Copy-Item -LiteralPath $files[0].FullName -Destination artifacts/release
+          }
+          $checksums = @(Get-ChildItem artifacts/packages -Recurse -File -Filter SHA256SUMS | Get-Content)
+          if ($checksums.Count -ne 2) { throw 'Expected checksums for both platforms.' }
+          $checksums | Sort-Object | Set-Content artifacts/release/SHA256SUMS -Encoding utf8NoBOM
+          foreach ($name in @('WhisperCLI.exe', 'whispercli')) {
+            $hash = (Get-FileHash "artifacts/release/$name" -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($checksums -cnotcontains "$hash  $name") { throw "Checksum mismatch for $name." }
+          }
+      - name: Generate release notes from commits
+        shell: pwsh
+        env:
+          RELEASE_TAG: v${{ needs.version.outputs.SemVer }}
+          RELEASE_COMMIT: ${{ github.sha }}
+        run: |
+          ./.github/scripts/generate-release-notes.ps1 `
+            -Tag $env:RELEASE_TAG `
+            -Commit $env:RELEASE_COMMIT `
+            -Repository $env:GITHUB_REPOSITORY `
+            -ServerUrl $env:GITHUB_SERVER_URL
+      - name: Publish GitHub Release
+        uses: ncipollo/release-action@v1
+        with:
+          tag: v${{ needs.version.outputs.SemVer }}
+          commit: ${{ github.sha }}
+          name: WhisperCLI ${{ needs.version.outputs.SemVer }}
+          artifacts: artifacts/release/*
+          artifactErrorsFailBuild: true
+          bodyFile: artifacts/release-notes.md
+          allowUpdates: true
+          makeLatest: true

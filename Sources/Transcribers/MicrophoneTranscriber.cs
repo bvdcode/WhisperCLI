@@ -1,20 +1,43 @@
-using Serilog;
+﻿using Serilog;
 using NAudio.Wave;
 using Whisper.net;
 using System.Text;
-using WhisperCLI.Transcribers;
+using Xabe.FFmpeg;
 
 namespace WhisperCLI.Transcribers
 {
-    public class MicrophoneTranscriber : IMicrophoneTranscriber
+    public class MicrophoneTranscriber
     {
         private readonly ILogger _logger;
         private readonly int _microphoneIndex;
+        private readonly WhisperVadProcessor? _vad;
+        private readonly bool _detectLanguage;
 
-        public MicrophoneTranscriber(ILogger logger, int microphoneIndex)
+        private async Task CheckFfmpegAsync(CancellationToken token)
+        {
+            await FFmpegBootstrapper.EnsureAvailableAsync(_logger, token).ConfigureAwait(false);
+        }
+
+        private async Task<FileInfo> TranscodeWavToMp3Async(string wavPath, CancellationToken token)
+        {
+            await CheckFfmpegAsync(token);
+
+            string mp3Path = Path.ChangeExtension(wavPath, ".mp3");
+            IConversion conversion = await FFmpeg.Conversions.FromSnippet.Convert(wavPath, mp3Path);
+            conversion.OnProgress += (sender, args) =>
+            {
+                _logger.Information("Transcoding WAV to MP3: {argsPercent}%", args.Percent);
+            };
+            await conversion.Start(token);
+            return new FileInfo(mp3Path);
+        }
+
+        public MicrophoneTranscriber(ILogger logger, int microphoneIndex, WhisperVadProcessor? vad = null, bool detectLanguage = false)
         {
             _logger = logger;
             _microphoneIndex = microphoneIndex;
+            _vad = vad;
+            _detectLanguage = detectLanguage;
             _logger.Information("Available audio input devices: {deviceCount}", WaveInEvent.DeviceCount);
             if (WaveInEvent.DeviceCount == 0)
             {
@@ -29,21 +52,23 @@ namespace WhisperCLI.Transcribers
             _logger.Information("Using microphone[{index}]: {micName}", microphoneIndex, WaveInEvent.GetCapabilities(microphoneIndex).ProductName);
         }
 
-        public async Task<FileInfo> TranscribeAudioAsync(WhisperProcessor processor, Func<bool> stopRecording, CancellationToken token)
+        public async Task<FileInfo> TranscribeAudioAsync(
+            Task<WhisperProcessor> processorTask,
+            bool saveTranscript,
+            OutputFormat format,
+            Func<bool> stopRecording,
+            CancellationToken token)
         {
             _logger.Information("Starting microphone recording...");
 
-            var waveIn = new WaveInEvent
+            WaveInEvent waveIn = new()
             {
                 DeviceNumber = _microphoneIndex,
                 WaveFormat = new WaveFormat(16000, 1)
             };
 
-            string tempPath = Path.GetTempPath();
-            string workingDirectory = Path.Combine(tempPath, "WhisperCLI", "Recordings");
-            var di = Directory.CreateDirectory(workingDirectory);
-            string wavOutputPath = Path.Combine(di.FullName, "recording-" + DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".wav");
-            using var waveWriter = new WaveFileWriter(wavOutputPath, waveIn.WaveFormat);
+            string wavOutputPath = Path.Combine(AppPaths.RecordingsDirectory, "recording-" + DateTime.Now.ToString("yyyyMMdd_HHmmss") + ".wav");
+            await using WaveFileWriter waveWriter = new(wavOutputPath, waveIn.WaveFormat);
             waveIn.DataAvailable += (s, a) =>
             {
                 waveWriter.Write(a.Buffer, 0, a.BytesRecorded);
@@ -61,32 +86,43 @@ namespace WhisperCLI.Transcribers
             }
 
             waveIn.StopRecording();
-            waveWriter.Dispose();
+            await waveWriter.DisposeAsync();
             waveIn.Dispose();
 
             _logger.Information("Recording stopped. Transcribing...");
-            using var audioStream = new MemoryStream(File.ReadAllBytes(wavOutputPath));
-            StringBuilder sb = new();
-            await foreach (var res in processor.ProcessAsync(audioStream, token))
+            await using FileStream audioStream = File.OpenRead(wavOutputPath);
+            List<TranscriptSegment> segments = [];
+            await using WhisperProcessor processor = await processorTask.ConfigureAwait(false);
+            await foreach (TranscriptSegment segment in SpeechTranscriber.ProcessAsync(audioStream, processor, _vad, _logger, token, _detectLanguage))
             {
-                _logger.Information("{lang}: {start}-{end} — {text}",
-                    res.Language,
-                    res.Start.ToString(@"hh\:mm\:ss"),
-                    res.End.ToString(@"hh\:mm\:ss"),
-                    res.Text);
-                sb.Append(res.Text);
-                if (token.IsCancellationRequested)
-                {
-                    break;
-                }
+                segments.Add(segment);
             }
             _logger.Information("Transcription completed - wave file saved to {wavOutputPath}", wavOutputPath);
-            if (sb.Length > 0)
+            if (segments.Count > 0)
             {
-                string textFile = Path.ChangeExtension(wavOutputPath, ".txt");
-                await File.WriteAllTextAsync(textFile, sb.ToString(), token);
-                _logger.Information("Transcription saved to {textFile}", textFile);
-                return new(textFile);
+                string outputFile = Path.ChangeExtension(wavOutputPath, TranscriptFormatter.GetFileExtension(format));
+                await File.WriteAllTextAsync(outputFile, TranscriptFormatter.Format(segments, format), token);
+                _logger.Information("Transcription saved to {outputFile}", outputFile);
+                if (saveTranscript)
+                {
+                    string saveDirectory = AppPaths.TranscriptsDirectory;
+                    string savedFilePath = Path.Combine(saveDirectory, Path.GetFileName(outputFile));
+                    File.Copy(outputFile, savedFilePath, true);
+                    
+                    try
+                    {
+                        FileInfo mp3File = await TranscodeWavToMp3Async(wavOutputPath, token);
+                        _logger.Information("MP3 file saved to {mp3OutputPath}", mp3File.FullName);
+                        string savedMp3Path = Path.Combine(saveDirectory, Path.GetFileName(mp3File.FullName));
+                        File.Copy(mp3File.FullName, savedMp3Path, true);
+                        _logger.Information("MP3 copied to {savedMp3Path}", savedMp3Path);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.Warning(ex, "Failed to transcode recording to MP3");
+                    }
+                }
+                return new(outputFile);
             }
             else
             {

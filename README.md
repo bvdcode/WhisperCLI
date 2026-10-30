@@ -1,44 +1,52 @@
 # WhisperCLI
 
+[![CodeFactor](https://www.codefactor.io/repository/github/bvdcode/whispercli/badge)](https://www.codefactor.io/repository/github/bvdcode/whispercli)
+
 WhisperCLI is a command-line tool for transcribing audio from files or microphone input using OpenAI's Whisper speech recognition models via the Whisper.net library.
 
 ## Features
 
-- Transcribe audio and video files to text
+- Transcribe audio and video files to subtitles or text
+- Generate subtitles for all media files in a folder
 - Record and transcribe audio directly from microphone
 - Support for various audio and video formats (mp3, mp4, mkv, avi, etc.)
 - Automatic downloading of Whisper models
 - Automatic downloading of FFmpeg
 - Support for different Whisper model sizes (default: LargeV3Turbo)
-- Cross-platform functionality (Windows and Unix)
+- Standalone Windows x64 and Linux x64 executables, with optional CUDA acceleration
 - Progress reporting during conversion and transcription
+- Exclude standalone phrases from the built-in dictionary in file and microphone transcripts
+- Detect speech with Silero VAD and preserve continuous speech regions and source timestamps
+
+The exclusion dictionary currently contains `Продолжение следует` and the credit variants `Субтитры создавал DimaTorzok`, `Субтитры сделал DimaTorzok`, and `Субтитры делал DimaTorzok`. Matching ignores capitalization, punctuation, and extra whitespace. A segment is omitted only when its entire text matches the phrase; sentences containing other words are preserved. A genuinely spoken standalone phrase from this dictionary is also omitted.
 
 ## Requirements
 
-- .NET 9.0
-
-### If running on Linux
-
-- xsel
-- aplay, amixer, arecord (refer to https://github.com/mobiletechtracker/NetCoreAudio)
+- Windows x64 or Linux x64 with glibc for the published executables; no separate .NET installation is required
+- Microphone recording requires Windows; file and folder transcription work on both platforms
+- .NET SDK 10.0.301 for building from source
 
 ## Installation
 
 ### Using Published Release
 
-Download the latest release from the releases page and extract it to your preferred location.
+Download `WhisperCLI.exe` for Windows or `whispercli` for Linux from the [latest release](https://github.com/bvdcode/WhisperCLI/releases/latest). On Linux, run `chmod +x whispercli` before launching it. Each executable includes the .NET runtime and Whisper native libraries, which are extracted to the system temporary directory on first launch. Models and FFmpeg are downloaded as needed.
+
+`SHA256SUMS` is included in each release to verify the executable's checksum.
 
 ### Building from Source
 
 1. Clone the repository
-2. Navigate to the Sources directory
+2. Use the .NET SDK version pinned in `global.json`
 3. Build the project:
    ```
-   dotnet build
+   dotnet build Sources/WhisperCLI.sln
    ```
 4. Publish the project (optional):
    ```
-   dotnet publish -c Release
+   dotnet publish Sources/WhisperCLI.csproj -p:PublishProfile=FolderProfile -r win-x64
+   # Or publish for Linux:
+   dotnet publish Sources/WhisperCLI.csproj -p:PublishProfile=FolderProfile -r linux-x64
    ```
 
 ## Usage
@@ -52,15 +60,41 @@ WhisperCLI [options] [inputFilePath]
 ### Command Line Options
 
 - `-m, --model`: Model to use for transcription (default: LargeV3Turbo)
+- `-l, --language`: Audio language code, such as `ru` or `en` (default: `auto`)
+- `--beam-size`: Decoding candidates, from 1 to 16 (default: 5). Use 1 for faster greedy decoding
+- `--vad-threshold`: Speech detection probability threshold between 0 and 1 (default: 0.5). Lower values retain more quiet speech
+- `--no-vad`: Disable speech detection for comparison or difficult audio. The entire recording, including pauses, is passed to Whisper
 - `-i, --microphone-index`: Index of microphone to use for recording (default: 0)
 - `-s, --stop-key`: Key to stop recording when using microphone input (default: Spacebar)
-- `inputFilePath`: Path to the audio or video file to transcribe (if omitted, uses microphone input)
+- `-f, --format`: Output format for file/folder transcription: `srt`, `vtt`, or `txt` (default: `srt`; microphone always writes `txt`)
+- `--folder`: Process all media files in the specified folder
+- `-r, --recursive`: Include subfolders when using `--folder`
+- `--update`: Download the latest stable GitHub Release and update the executable for the current operating system and architecture
+- `inputFilePath`: Path to the audio/video file or folder to transcribe (if omitted without `--folder`, uses microphone input)
 
 ### Examples
 
 ```
 # Transcribe an audio file
 WhisperCLI input.mp3
+
+# Transcribe Russian speech
+WhisperCLI -l ru input.mp3
+
+# Transcribe Russian lectures with speech detection and beam search
+WhisperCLI -l ru --beam-size 5 --folder "D:\Lectures"
+
+# Retain more quiet speech when the default speech detector misses it
+WhisperCLI -l ru --vad-threshold 0.35 input.mp4
+
+# Transcribe an audio file as plain text
+WhisperCLI -f txt input.mp3
+
+# Generate subtitles for all media files in the current folder
+WhisperCLI --folder .
+
+# Generate subtitles for all media files in a folder and its subfolders
+WhisperCLI --folder "D:\Media" -r
 
 # Transcribe a video file with a specific model
 WhisperCLI -m Small video.mp4
@@ -90,15 +124,40 @@ WhisperCLI -s Enter
 - LargeV3
 - LargeV3Turbo (default)
 
+### Updating
+
+Run the installed executable with `--update`:
+
+```
+WhisperCLI.exe --update
+# Linux
+./whispercli --update
+```
+
+The updater compares the installed version with the latest stable GitHub Release. If a newer version is available, it checks the download size, GitHub's SHA-256 digest, product name, and version before replacing the executable. The updater selects `WhisperCLI.exe` on Windows x64 and `whispercli` on Linux x64. A missing platform asset is an error; it never downloads the other operating system's executable. The original filename and installation directory are preserved. Models, recordings, and transcripts are retained.
+
+The installation folder must be writable. On Windows, a hidden PowerShell helper applies the update after the application exits. Its result is recorded beside the executable in `<executable>.update.log`. On Linux, the verified executable atomically replaces the installed file while preserving its execute permissions. Completion is reported in the terminal. Network or checksum failures do not change the installed executable. Use `--update` without a media file or `--folder`.
+
+Versions through 1.0.2 require a manual download to adopt the current release executable name. The Linux executable in 1.0.4 also requires a manual download to adopt the working Linux updater.
+
 ## How It Works
 
 ### For File Input
 
-1. The program downloads the specified Whisper model if not already present (stored in your temp directory)
+1. The program downloads the specified Whisper model if not already present (stored in `%LOCALAPPDATA%/WhisperCLI/Models` on Windows)
 2. FFmpeg is downloaded automatically if not already present
-3. The input audio/video file is converted to the proper WAV format using FFmpeg
-4. The audio is processed using the Whisper model
-5. The transcription is saved as a text file in the same location as the input file
+3. The input audio/video file is converted to 16 kHz mono PCM WAV using FFmpeg
+4. Silero VAD detects speech; overlapping or nearby padded regions are merged and passed intact to Whisper, without a duration limit. Whisper manages its own decoding windows. Original audio positions are retained in subtitle timestamps
+5. The transcription is saved in the selected output format in the same location as the input file
+
+The small Silero VAD model (`ggml-silero-v6.2.0.bin`) is downloaded to the same model cache on first use. Speech detection runs on the CPU with no maximum speech duration; the application does not force cuts through continuous speech. Native text-history conditioning is disabled (`WithMaxLastTextTokens(0)`) so a mistaken phrase or punctuation style is not carried into later decoding windows. No instructional prompt is supplied: Whisper can copy such instructions into the transcript. With `-l auto`, the language is detected once per recording from up to 30 seconds of a speech region and retained for transcription. Temperature fallback remains enabled. These measures reduce silence hallucinations and repeated text, but do not guarantee perfect words or punctuation. VAD can still miss quiet speech; use `--vad-threshold` to adjust sensitivity or `--no-vad` to compare the entire recording without speech detection.
+
+### For Folder Input
+
+1. Pass `--folder <path>` to process every FFmpeg-detectable media file in that folder
+2. Add `-r` or `--recursive` to include subfolders
+3. Each output file is saved next to its source media file
+4. Folder runs skip media files whose output already exists in the selected format, before probing or transcription. Pass a single media file explicitly to regenerate its transcript
 
 ### For Microphone Input
 
@@ -106,7 +165,7 @@ WhisperCLI -s Enter
 2. Audio is recorded from the selected microphone until the stop key is pressed
 3. The recording is saved as a WAV file in your temp directory
 4. The audio is processed using the Whisper model
-5. The transcription is saved alongside the recording and opened automatically
+5. The transcription is saved as plain text alongside the recording
 
 ## Dependencies
 
@@ -116,6 +175,14 @@ WhisperCLI -s Enter
 - [Serilog](https://serilog.net/)
 - [CommandLineParser](https://github.com/commandlineparser/commandline)
 - CUDA runtime support (optional for GPU acceleration)
+
+## Builds and Releases
+
+Pushes to `main` run dependency auditing, Release builds, transcript and updater tests, and standalone transcription checks on Windows and Linux. Only after both platform jobs pass does one GitHub Release publish `WhisperCLI.exe`, `whispercli`, and a combined `SHA256SUMS`. Folder checks verify that completed transcripts are skipped before probing or loading a model. Pull requests run the same validation without publishing a release.
+
+GitVersion 6.7.0 calculates the build version. The release policy starts at `1.0.0` and increments the patch version after the latest stable release tag. Rebuilding an already tagged commit uses its existing version. The same version is embedded in the executable and reported by `--version`.
+
+Release descriptions are generated from commit subjects since the highest earlier stable version tag reachable from the released commit, including direct commits to `main`. Each entry links to its commit, followed by a comparison link between versions. The first release includes the full commit history; rerunning a release regenerates the same range without treating its own tag as the previous version.
 
 ## License
 

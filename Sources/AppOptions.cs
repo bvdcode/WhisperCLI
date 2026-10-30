@@ -1,4 +1,4 @@
-using CommandLine;
+﻿using CommandLine;
 using Whisper.net.Ggml;
 
 namespace WhisperCLI
@@ -6,135 +6,59 @@ namespace WhisperCLI
     public class AppOptions
     {
         [Option('m', "model", Required = false, Default = GgmlType.LargeV3Turbo,
-            HelpText = "Primary Whisper model. Default: LargeV3Turbo.")]
+            HelpText = "Model to use for transcription. Default is 'large-v3-turbo'. Available models: " +
+            "'tiny', 'base', 'small', 'medium', 'large-v1', 'large-v2', 'large-v3-turbo'.")]
         public GgmlType Model { get; set; }
 
-        [Value(0, Required = false, HelpText = "Path to the input audio/video file. If omitted, microphone mode is used.")]
+        [Value(0, Required = false, HelpText = "Path to the input media file or folder to transcribe.")]
         public string InputFilePath { get; set; } = string.Empty;
 
-        [Option("language", Required = false, Default = "auto",
-            HelpText = "Whisper language code such as 'ru' or 'en'. Use 'auto' to auto-detect. For single-language recordings, explicitly specifying the language is more reliable.")]
-        public string Language { get; set; } = "auto";
-
-        [Option("fallback-models", Required = false, Default = "auto",
-            HelpText = "Fallback models for suspicious chunks: 'auto', 'none', or a comma-separated list (for example LargeV3,LargeV2). Models are loaded lazily only when needed.")]
-        public string FallbackModels { get; set; } = "auto";
-
-        [Option("runtime", Required = false, Default = "auto",
-            HelpText = "Whisper native runtime: auto, gpu, cuda, cuda12, vulkan, or cpu. 'auto' preserves Whisper.net 1.8.1's original runtime selection exactly; cuda12 is an alias for cuda.")]
-        public string Runtime { get; set; } = "auto";
-
-        [Option("gpu-device", Required = false, Default = 0,
-            HelpText = "GPU device index passed to Whisper where the native backend honors it. Whisper.net 1.8.1 Vulkan may ignore this; Linux NVIDIA auto mode uses PRIME Vulkan selection instead. Default: 0.")]
-        public int GpuDevice { get; set; } = 0;
-
-        [Option("use-vad", Required = false, Default = true,
-            HelpText = "Use the managed energy/silence detector to place coarse chunk boundaries at pauses. It is used only as a boundary hint; audio is never dropped because of it. Specify '--use-vad false' to disable. Default: true.")]
-        public bool? UseVadOption { get; set; } = true;
-        public bool UseVad => UseVadOption ?? true;
-
-        [Option("chunk-seconds", Required = false, Default = 75,
-            HelpText = "Target duration of independent long-file chunks in seconds. Default: 75.")]
-        public int ChunkSeconds { get; set; } = 75;
-
-        [Option("max-chunk-seconds", Required = false, Default = 90,
-            HelpText = "Maximum chunk duration in seconds before forcing a boundary. Default: 90.")]
-        public int MaxChunkSeconds { get; set; } = 90;
-
-        [Option("max-context-tokens", Required = false, Default = 64,
-            HelpText = "Compatibility option retained for existing commands. v9 deliberately leaves the primary decoder context at Whisper.net's original default; recovery passes disable context.")]
-        public int MaxContextTokens { get; set; } = 64;
-
-        [Option("entropy-threshold", Required = false, Default = 2.7f,
-            HelpText = "Whisper entropy threshold used for decoding fallback. Default: 2.7.")]
-        public float EntropyThreshold { get; set; } = 2.7f;
-
-        [Option("temperature", Required = false, Default = 0.0f,
-            HelpText = "Initial Whisper decoding temperature. Default: 0.0.")]
-        public float Temperature { get; set; } = 0.0f;
-
-        [Option("temperature-increment", Required = false, Default = 0.2f,
-            HelpText = "Temperature increment used by Whisper fallback decoding. Default: 0.2.")]
-        public float TemperatureIncrement { get; set; } = 0.2f;
-
-        [Option("glitch-threshold", Required = false, Default = 0.65,
-            HelpText = "Automatic repetition/glitch score threshold in the range 0..1. Default: 0.65.")]
-        public double GlitchThreshold { get; set; } = 0.65;
-
-        [Option("max-recovery-depth", Required = false, Default = 2,
-            HelpText = "Maximum recursive chunk splitting depth after direct retries fail. Default: 2.")]
-        public int MaxRecoveryDepth { get; set; } = 2;
-
-        [Option("min-recovery-split-seconds", Required = false, Default = 15,
-            HelpText = "Minimum child duration when recursively splitting a problematic chunk. Default: 15 seconds.")]
-        public int MinRecoverySplitSeconds { get; set; } = 15;
-
-        [Option("resume", Required = false, Default = true,
-            HelpText = "Reuse completed chunks, including completed-with-review outcomes, from a matching checkpoint. Specify '--resume false' for a fresh run. Default: true.")]
-        public bool? ResumeOption { get; set; } = true;
-        public bool Resume => ResumeOption ?? true;
-
-        [Option("retry-review", Required = false, Default = false,
-            HelpText = "Explicitly retry cached chunks marked for review. A normal resume keeps these terminal outcomes instead of repeating an exhausted recovery ladder.")]
-        public bool RetryReview { get; set; }
-
-        [Option("revalidate-checkpoint", Required = false, Default = false,
-            HelpText = "Explicitly rescore cached text with the current quality detector and retry suspicious chunks. Not performed on ordinary resume.")]
-        public bool RevalidateCheckpoint { get; set; }
-
-        [Option("lock-detected-language", Required = false, Default = true,
-            HelpText = "When --language auto is used, lock the first reliable detected language for later chunks. Specify false to disable. Default: true.")]
-        public bool? LockDetectedLanguageOption { get; set; } = true;
-        public bool LockDetectedLanguage => LockDetectedLanguageOption ?? true;
-
-        [Option("vad-threshold", Required = false, Default = 0.5f,
-            HelpText = "Managed silence detector sensitivity in the range 0..1. Higher values require more energy above the estimated noise floor. Default: 0.5.")]
-        public float VadThreshold { get; set; } = 0.5f;
-
-        [Option("vad-min-speech-ms", Required = false, Default = 250,
-            HelpText = "Minimum detected active-audio duration in milliseconds. Default: 250.")]
-        public int VadMinSpeechMs { get; set; } = 250;
-
-        [Option("vad-min-silence-ms", Required = false, Default = 700,
-            HelpText = "Minimum quiet gap used to close an active-audio region, in milliseconds. Default: 700.")]
-        public int VadMinSilenceMs { get; set; } = 700;
-
-        [Option("vad-speech-padding-ms", Required = false, Default = 250,
-            HelpText = "Padding applied around detected active-audio regions, in milliseconds. Default: 250.")]
-        public int VadSpeechPaddingMs { get; set; } = 250;
-
-        [Option("vad-edge-padding-ms", Required = false, Default = 150,
-            HelpText = "Safety margin kept away from detected activity when choosing a chunk boundary, in milliseconds. Default: 150.")]
-        public int VadEdgePaddingMs { get; set; } = 150;
-
-        [Option('i', "microphone-index", Required = false, Default = 0,
-            HelpText = "Index of the microphone to use for recording. Default: 0.")]
+        [Option('i', "microphone-index", Required = false, Default = 0, HelpText = "Index of the microphone to use for recording. Default is 0 (first microphone).")]
         public int MicrophoneIndex { get; set; }
 
-        [Option('s', "stop-key", Required = false, Default = ConsoleKey.Spacebar,
-            HelpText = "Key to stop microphone recording. Default: Spacebar.")]
+        [Option('s', "stop-key", Required = false, Default = ConsoleKey.Spacebar, HelpText = "Key to stop recording when using microphone input. Default is 'Space'.")]
         public ConsoleKey StopKey { get; set; }
 
-        [Option('o', "open-results", Required = false, Default = false,
-            HelpText = "Open the resulting text file after transcription.")]
+        [Option('o', "open-results", Required = false, Default = false, HelpText = "Open the result file after transcription.")]
         public bool OpenTextFile { get; set; }
 
-        [Option('c', "copy-to-clipboard", Required = false, Default = true,
-            HelpText = "Copy the transcription result to the clipboard. Specify '-c false' or '--copy-to-clipboard false' to disable. Default: true.")]
-        public bool? CopyToClipboardOption { get; set; } = true;
-        public bool CopyToClipboard => CopyToClipboardOption ?? true;
+        [Option('c', "copy-to-clipboard", Required = false, Default = true, HelpText = "Copy the transcription result to the clipboard.")]
+        public bool CopyToClipboard { get; set; }
 
-        [Option('d', "delay-seconds", Required = false, Default = 10,
-            HelpText = "Delay before closing the application. Default: 10 seconds.")]
-        public int DelaySeconds { get; set; } = 10;
+        [Option('d', "delay-seconds", Required = false, Default = 10, HelpText = "Delay in seconds before closing the application after completion or an early error. Default is 10 seconds.")]
+        public int DelaySeconds { get; set; }
 
-        [Option('l', "lockfile", Required = false, Default = true,
-            HelpText = "Prevent simultaneous WhisperCLI instances. Specify '-l false' or '--lockfile false' to disable. Default: true.")]
-        public bool? UseLockfileOption { get; set; } = true;
-        public bool UseLockfile => UseLockfileOption ?? true;
+        [Option("lockfile", Required = false, Default = false, HelpText = "Use a lockfile to prevent multiple instances from running simultaneously. Default is true.")]
+        public bool UseLockfile { get; set; }
 
-        [Option('v', "verbose", Required = false, Default = false,
-            HelpText = "Enable verbose logging.")]
+        [Option("save-transcript", Required = false, Default = true, HelpText = "Copy microphone transcripts to the local app data transcripts folder. Default is true.")]
+        public bool SaveTranscript { get; set; } = true;
+
+        [Option('v', "verbose", Required = false, Default = false, HelpText = "Enable verbose logging.")]
         public bool Verbose { get; set; }
+
+        [Option('l', "language", Required = false, Default = "auto", HelpText = "Language of the audio input. Default is 'auto'. Specify a language code (e.g., 'en' for English) to force a specific language.")]
+        public string Language { get; set; } = "auto";
+
+        [Option("beam-size", Required = false, Default = 5, HelpText = "Number of decoding candidates. Default is 5; use 1 for faster greedy decoding. Range: 1-16.")]
+        public int BeamSize { get; set; } = 5;
+
+        [Option("no-vad", Required = false, Default = false, HelpText = "Disable speech detection and pass the entire recording to Whisper, including pauses.")]
+        public bool NoVad { get; set; }
+
+        [Option("vad-threshold", Required = false, Default = 0.5f, HelpText = "Speech detection probability threshold between 0 and 1. Default is 0.5; lower values retain more quiet speech.")]
+        public float VadThreshold { get; set; } = 0.5f;
+
+        [Option('f', "format", Required = false, Default = OutputFormat.Srt, HelpText = "Output format for file/folder transcription: srt, vtt, or txt. Default is srt. Microphone transcription always writes txt.")]
+        public OutputFormat Format { get; set; } = OutputFormat.Srt;
+
+        [Option("folder", Required = false, HelpText = "Process all media files in the specified folder. Use '.' for the current folder.")]
+        public string FolderPath { get; set; } = string.Empty;
+
+        [Option('r', "recursive", Required = false, Default = false, HelpText = "When using folder input, include subfolders.")]
+        public bool Recursive { get; set; }
+
+        [Option("update", Required = false, Default = false, HelpText = "Download the latest stable GitHub Release and update this executable.")]
+        public bool Update { get; set; }
     }
 }
